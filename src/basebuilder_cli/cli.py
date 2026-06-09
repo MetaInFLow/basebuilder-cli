@@ -522,7 +522,8 @@ def compact_progress_data(data: dict[str, Any]) -> dict[str, Any]:
         }
 
     artifact_counts = first_mapping(raw.get("artifact_counts"))
-    by_type = first_mapping(artifact_counts.get("by_type"))
+    normalized_counts = first_mapping(raw.get("artifactCounts"))
+    by_type = first_mapping(artifact_counts.get("by_type"), normalized_counts)
     if by_type:
         result["artifactCounts"] = {
             key: by_type.get(key, 0)
@@ -584,10 +585,24 @@ def print_progress_event(event_type: str, data: dict[str, Any]) -> None:
     prefix = f"{event_type}"
     if progress not in (None, ""):
         prefix += f" {progress}%"
+    extras: list[str] = []
+    if data.get("baseUrl"):
+        extras.append(str(data["baseUrl"]))
+    counts = data.get("artifactCounts")
+    if isinstance(counts, dict):
+        count_parts = [
+            f"{label}={counts[key]}"
+            for key, label in (("table", "tables"), ("field", "fields"), ("view", "views"))
+            if key in counts
+        ]
+        if count_parts:
+            extras.append("summary " + " ".join(count_parts))
     if message:
-        print(f"{prefix}: {message}")
+        suffix = (" | " + " | ".join(extras)) if extras else ""
+        print(f"{prefix}: {message}{suffix}")
     else:
-        print(prefix)
+        suffix = (": " + " | ".join(extras)) if extras else ""
+        print(prefix + suffix)
 
 
 if __name__ == "__main__":

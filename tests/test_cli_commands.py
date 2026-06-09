@@ -43,7 +43,12 @@ class FakeCreateClient:
     def attach_progress(self, run_id):
         return iter([
             StreamEvent("snapshot", {"status": "running", "progress": 30, "message": "创建数据表"}),
-            StreamEvent("snapshot", {"status": "success", "progress": 100, "baseUrl": "https://metainflow.feishu.cn/base/sample"}),
+            StreamEvent("snapshot", {
+                "status": "success",
+                "progress": 100,
+                "baseUrl": "https://metainflow.feishu.cn/base/sample",
+                "artifactCounts": {"table": 2, "field": 5, "view": 3},
+            }),
         ])
 
 
@@ -235,6 +240,27 @@ class CliCommandTest(unittest.TestCase):
         ])
         self.assertTrue(all(payload["ok"] is True for payload in payloads))
         self.assertEqual(payloads[-1]["data"]["progress"], 100)
+
+    def test_create_human_mode_prints_three_elements_and_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeCreateClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main([
+                            "create",
+                            "--prompt",
+                            "做一个跨境电商进销存",
+                            "--auto-accept",
+                        ])
+
+        text = out.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("三要素:", text)
+        self.assertIn("管理对象: 管理跨境电商 SKU 与库存", text)
+        self.assertIn("snapshot 30%: 创建数据表", text)
+        self.assertIn("https://metainflow.feishu.cn/base/sample", text)
+        self.assertIn("summary tables=2 fields=5 views=3", text)
 
     def test_interactive_ndjson_create_supports_optimize_edit_accept_without_stdout_prompts(self):
         with tempfile.TemporaryDirectory() as tmp:
