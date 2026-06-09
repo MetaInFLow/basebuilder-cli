@@ -289,6 +289,19 @@ class CliCommandTest(unittest.TestCase):
         self.assertEqual(client.calls[2][2], 321)
         self.assertEqual(client.calls[2][3], "task_cli_321")
 
+    def test_create_flow_does_not_start_build_before_confirmation(self):
+        client = FakeInteractiveClient("https://www.basebuilder.cn")
+        flow = cli.CreateFlow(client)
+
+        result = flow.run("做一个客户线索 CRM", [
+            "show",
+            {"action": "edit", "fields": "客户名、阶段、成交金额"},
+        ])
+
+        self.assertEqual(result.status, "needs_confirmation")
+        self.assertEqual(result.run, {})
+        self.assertNotIn("start_build", [call[0] for call in client.calls])
+
     def test_runs_inspect_fetches_api_snapshot_when_token_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
