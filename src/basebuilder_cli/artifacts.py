@@ -13,6 +13,9 @@ SENSITIVE_KEY_FRAGMENTS = [
     "secret",
     "password",
     "authorization",
+    "answer_text",
+    "problem_text",
+    "raw",
     "raw_prompt",
     "raw_log",
 ]

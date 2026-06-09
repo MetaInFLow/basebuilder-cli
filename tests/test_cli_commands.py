@@ -160,6 +160,15 @@ class FakeAgentClient:
         }
 
 
+class FakeAuthErrorClient:
+    def __init__(self, api_base, token=""):
+        self.api_base = api_base
+        self.token = token
+
+    def me(self):
+        raise ApiError("AUTH_REVOKED", "登录已退出，请重新运行 `basebuilder login`。", retryable=False)
+
+
 class FakeUrlopenResponse:
     def __init__(self, payload: str):
         self.payload = payload
@@ -358,6 +367,22 @@ class CliCommandTest(unittest.TestCase):
         self.assertNotIn('"hostname"', encoded)
         self.assertNotIn('"username"', encoded)
         self.assertNotIn('"mac"', encoded)
+
+    def test_revoked_token_request_returns_structured_error_envelope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_config(cli.CliConfig(api_base="https://www.basebuilder.cn", token="revoked_token"))
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeAuthErrorClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main(["whoami", "--format", "json"])
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["ok"], False)
+        self.assertEqual(payload["operation"], "me")
+        self.assertEqual(payload["error"]["code"], "AUTH_REVOKED")
+        self.assertEqual(payload["error"]["retryable"], False)
 
 
 if __name__ == "__main__":

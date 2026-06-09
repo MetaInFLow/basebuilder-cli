@@ -83,6 +83,20 @@ class ArtifactsTest(unittest.TestCase):
         self.assertIn("1. 录入SKU -> 同步库存 -> 查看预警", manual_text)
         self.assertNotIn("2. 入", manual_text)
 
+    def test_skill_schema_drops_raw_history_containers(self):
+        artifact = dict(SAMPLE_ARTIFACT)
+        artifact["raw"] = {"answer_text": [{"message": "internal"}]}
+        artifact["answer_text"] = [{"prompt": "internal prompt"}]
+        artifact["problem_text"] = {"token": "secret"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_dir = write_skill(artifact, Path(tmp) / "skill")
+            schema_text = (skill_dir / "references" / "base-schema.json").read_text()
+
+        lowered = schema_text.lower()
+        for forbidden in ["raw", "answer_text", "problem_text", "internal prompt", "secret"]:
+            self.assertNotIn(forbidden, lowered)
+
 
 if __name__ == "__main__":
     unittest.main()

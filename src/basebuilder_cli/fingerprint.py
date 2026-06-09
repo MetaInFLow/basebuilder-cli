@@ -21,7 +21,7 @@ def build_fingerprint(state_dir: Path) -> dict[str, Any]:
     raw_signals = {
         "hostname": socket.gethostname(),
         "username": getpass.getuser(),
-        "mac": str(uuid.getnode()),
+        "mac": stable_mac_node(),
         "os": platform.system().lower(),
         "arch": platform.machine().lower(),
         "nonce": nonce,
@@ -39,6 +39,19 @@ def build_fingerprint(state_dir: Path) -> dict[str, Any]:
             "signalSchema": SIGNAL_SCHEMA,
         },
     }
+
+
+def stable_mac_node() -> str:
+    node = uuid.getnode()
+    if not node:
+        return ""
+
+    # uuid.getnode() may synthesize a random multicast node when no stable
+    # hardware address is available. Exclude that value so the fingerprint stays
+    # stable across CLI processes on hosts where MAC lookup is restricted.
+    if (node >> 40) & 1:
+        return ""
+    return f"{node:012x}"
 
 
 def load_or_create_install_nonce(state_dir: Path) -> str:

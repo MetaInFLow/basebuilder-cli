@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,21 @@ class FingerprintTest(unittest.TestCase):
         self.assertNotIn('"hostname"', encoded)
         self.assertNotIn('"username"', encoded)
         self.assertNotIn('"mac"', encoded)
+
+    def test_random_multicast_mac_node_is_ignored_for_stability(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            with mock.patch(
+                "basebuilder_cli.fingerprint.uuid.getnode",
+                side_effect=[
+                    0x010203040506,
+                    0x030203040506,
+                ],
+            ):
+                first = build_fingerprint(state_dir)
+                second = build_fingerprint(state_dir)
+
+        self.assertEqual(first["fingerprint_hash"], second["fingerprint_hash"])
 
 
 if __name__ == "__main__":
