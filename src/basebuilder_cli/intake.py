@@ -13,41 +13,91 @@ from .client import ApiError
 SUPPORTED_MODES = {"text", "excel"}
 
 
+TEMPLATE_FIELD_ALIASES = {
+    "wantToBuild": ("wantToBuild", "want_to_build", "title", "我想要构建", "想要构建", "我要构建", "构建目标"),
+    "role": ("role", "persona", "team", "我是", "我们是", "用户身份", "团队角色"),
+    "scenario": ("scenario", "business_scenario", "current_process", "currentWorkflow", "业务场景", "当前流程", "使用场景"),
+    "painPoints": ("painPoints", "pain_points", "pains", "pain", "痛点", "问题", "当前痛点"),
+    "existingMaterials": ("existingMaterials", "existing_materials", "materials", "已有资料", "已有材料", "资料"),
+    "desiredOutputs": ("desiredOutputs", "desired_outputs", "goals", "outputs", "希望输出", "目标", "期望产出"),
+    "constraints": ("constraints", "limits", "约束", "限制", "不做"),
+    "examples": ("examples", "samples", "参考案例", "例子"),
+    "background": ("background", "背景", "补充背景"),
+}
+
+LIST_TEMPLATE_FIELDS = {"painPoints", "desiredOutputs", "constraints", "examples"}
+
+
 def build_intake_prompt(
     *,
     prompt: str,
     mode: str = "text",
     input_path: str = "",
     files: list[str] | None = None,
+    structured_input: dict[str, Any] | None = None,
 ) -> str:
+    payload = build_intake_payload(
+        prompt=prompt,
+        mode=mode,
+        input_path=input_path,
+        files=files,
+        structured_input=structured_input,
+    )
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def build_intake_payload(
+    *,
+    prompt: str,
+    mode: str = "text",
+    input_path: str = "",
+    files: list[str] | None = None,
+    structured_input: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     files = files or []
-    structured: dict[str, Any] = {}
+    structured: dict[str, Any] = dict(structured_input or {})
     if input_path:
-        structured = load_structured_input(Path(input_path))
+        structured = {**structured, **load_structured_input(Path(input_path))}
         mode = str(structured.get("mode") or mode or "text")
     mode = normalize_mode(mode)
 
-    parts = [
-        "【BaseBuilder CLI Intake】",
-        f"mode={mode}",
-    ]
-    if mode == "excel":
-        parts.append("source of truth: uploaded spreadsheet structure")
-    elif files:
-        parts.append("file context: supporting background only, not schema source of truth")
+    template = normalize_template_input(structured)
+    freeform = prompt.strip()
+    if freeform:
+        template["freeformBrief"] = freeform
+    file_payloads = [summarize_file(Path(path), mode=mode) for path in files]
+    if mode == "excel" and not any(file.get("type") in {"csv", "xlsx"} for file in file_payloads):
+        raise ApiError("INTAKE_EXCEL_FILE_REQUIRED", "Excel 模式至少需要一个 .csv 或 .xlsx 文件。", retryable=False)
 
-    if prompt.strip():
-        parts.extend(["", "【用户输入】", prompt.strip()])
-    if structured:
-        parts.extend(["", "【结构化输入】", render_structured_input(structured)])
-
-    summaries = [summarize_file(Path(path), mode=mode) for path in files]
-    if summaries:
-        parts.extend(["", "【文件摘要】", "\n\n".join(summaries)])
-
-    if len(parts) <= 2:
+    if not any(value for value in template.values()) and not file_payloads:
         raise ApiError("INTAKE_EMPTY", "请输入需求，或提供 --input / --file。", retryable=False)
-    return "\n".join(parts).strip()
+
+    return {
+        "schemaVersion": "basebuilder.intake.v1",
+        "mode": mode,
+        "sourceTruth": "uploaded_spreadsheets" if mode == "excel" else "template_and_context",
+        "intakeTemplate": template,
+        "files": file_payloads,
+    }
+
+
+def build_refine_instruction(
+    *,
+    instruction: str,
+    files: list[str] | None = None,
+    mode: str = "text",
+) -> str:
+    files = files or []
+    if not files:
+        return instruction
+    normalized_mode = normalize_mode(mode)
+    payload = {
+        "schemaVersion": "basebuilder.three_elements_refine.v1",
+        "instruction": instruction,
+        "mode": normalized_mode,
+        "files": [summarize_file(Path(path), mode=normalized_mode) for path in files],
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def normalize_mode(mode: str) -> str:
@@ -69,55 +119,89 @@ def load_structured_input(path: Path) -> dict[str, Any]:
     return data
 
 
-def render_structured_input(data: dict[str, Any]) -> str:
-    lines: list[str] = []
-    for key in ("title", "scenario", "role", "background"):
-        value = data.get(key)
-        if value:
-            lines.append(f"{key}: {value}")
-    for key in ("goals", "constraints", "examples"):
-        values = data.get(key)
-        if isinstance(values, list) and values:
-            lines.append(f"{key}:")
-            for value in values:
-                lines.append(f"- {value}")
-    return "\n".join(lines) or json.dumps(data, ensure_ascii=False, indent=2)
+def normalize_template_input(data: dict[str, Any]) -> dict[str, Any]:
+    template: dict[str, Any] = {}
+    for field, aliases in TEMPLATE_FIELD_ALIASES.items():
+        value = first_present(data, aliases)
+        if field in LIST_TEMPLATE_FIELDS:
+            values = normalize_list(value)
+            if values:
+                template[field] = values
+            continue
+        text = normalize_text(value)
+        if text:
+            template[field] = text
+    return template
 
 
-def summarize_file(path: Path, *, mode: str) -> str:
+def first_present(data: dict[str, Any], aliases: tuple[str, ...]) -> Any:
+    for key in aliases:
+        if key in data and data[key] not in (None, "", []):
+            return data[key]
+    return None
+
+
+def normalize_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "；".join(str(item).strip() for item in value if str(item).strip())
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value).strip()
+
+
+def normalize_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, dict):
+        return [json.dumps(value, ensure_ascii=False, sort_keys=True)]
+    text = str(value).strip()
+    if not text:
+        return []
+    parts = text.replace("；", ",").replace("，", ",").replace("\n", ",").split(",")
+    return [part.strip() for part in parts if part.strip()]
+
+
+def summarize_file(path: Path, *, mode: str) -> dict[str, Any]:
     if not path.exists():
         raise ApiError("INTAKE_FILE_NOT_FOUND", f"文件不存在: {path}", retryable=False)
     suffix = path.suffix.lower()
     if suffix == ".csv":
         return summarize_csv(path, mode=mode)
     if suffix == ".xlsx":
-        return summarize_xlsx(path)
+        return summarize_xlsx(path, mode=mode)
     if suffix in {".txt", ".md", ".markdown"}:
         text = path.read_text(errors="ignore").strip()
         excerpt = text[:2000]
-        return f"file={path.name}\ntype=text\nexcerpt:\n{excerpt}"
+        return {
+            "fileName": path.name,
+            "type": "text",
+            "sourceRole": "supporting_context",
+            "excerpt": excerpt,
+        }
     raise ApiError("INTAKE_FILE_UNSUPPORTED", f"暂不支持该文件类型: {path.name}", retryable=False)
 
 
-def summarize_csv(path: Path, *, mode: str) -> str:
+def summarize_csv(path: Path, *, mode: str) -> dict[str, Any]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         rows = list(csv.reader(handle))
     header = rows[0] if rows else []
     row_count = max(0, len(rows) - 1)
-    lines = [
-        f"file={path.name}",
-        "type=csv",
-        f"mode={mode}",
-        f"columns={len(header)}",
-        "headers=" + ", ".join(header),
-        f"sampleRows={min(row_count, 3)}",
-    ]
-    for row in rows[1:4]:
-        lines.append("sample=" + ", ".join(row))
-    return "\n".join(lines)
+    return {
+        "fileName": path.name,
+        "type": "csv",
+        "sourceRole": "schema_source" if mode == "excel" else "supporting_context",
+        "columns": len(header),
+        "headers": header,
+        "rowCount": row_count,
+        "sampleRows": rows[1:4],
+    }
 
 
-def summarize_xlsx(path: Path) -> str:
+def summarize_xlsx(path: Path, *, mode: str) -> dict[str, Any]:
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         sheet_files = sorted(name for name in names if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"))
@@ -135,10 +219,12 @@ def summarize_xlsx(path: Path) -> str:
                 "dimension": dimension,
                 "headers": headers,
             })
-    lines = [f"file={path.name}", "type=xlsx", "mode=excel", "source of truth: workbook structure"]
-    for sheet in sheet_summaries:
-        lines.append(f"sheet={sheet['sheet']} dimension={sheet['dimension']} headers={', '.join(sheet['headers'])}")
-    return "\n".join(lines)
+    return {
+        "fileName": path.name,
+        "type": "xlsx",
+        "sourceRole": "schema_source" if mode == "excel" else "supporting_context",
+        "sheets": sheet_summaries,
+    }
 
 
 def read_shared_strings(archive: zipfile.ZipFile) -> list[str]:

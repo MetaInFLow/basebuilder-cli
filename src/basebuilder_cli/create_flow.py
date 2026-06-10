@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .intake import build_refine_instruction
+
 
 @dataclass
 class ThreeElements:
@@ -50,7 +52,9 @@ class CreateFlow:
                 continue
             if action == "optimize":
                 instruction = str(payload.get("instruction") or "")
-                optimize_response = self.api.optimize(elements, instruction, message_id=message_id or None, task_id=task_id or None)
+                files = [str(path) for path in payload.get("files") or []]
+                refine_instruction = build_refine_instruction(instruction=instruction, files=files)
+                optimize_response = self.api.optimize(elements, refine_instruction, message_id=message_id or None, task_id=task_id or None)
                 elements = normalize_elements(optimize_response)
                 message_id = extract_message_id(optimize_response) or message_id
                 task_id = extract_task_id(optimize_response) or task_id

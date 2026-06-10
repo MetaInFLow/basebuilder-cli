@@ -211,6 +211,8 @@ class CliCommandTest(unittest.TestCase):
         self.assertEqual(payload["api"]["default_base_url"], "https://www.basebuilder.cn")
         self.assertEqual(payload["api"]["production_port"], 443)
         self.assertIn("127.0.0.1:8999", payload["api"]["local_dev_override"])
+        self.assertIn("我想要构建", payload["intake"]["templateFields"])
+        self.assertIn("multiple spreadsheet files", payload["intake"]["excel"])
         self.assertIn("agent register", payload["commands"])
         self.assertEqual(payload["api"]["agent_registration"]["production_base_url"], "https://www.basebuilder.cn")
 
@@ -267,9 +269,15 @@ class CliCommandTest(unittest.TestCase):
             out = io.StringIO()
             err = io.StringIO()
             inputs = iter([
-                "做一个客户线索 CRM",
+                "客户线索 CRM",
+                "销售运营",
+                "",
+                "线索分散",
+                "",
+                "线索表",
                 "o",
                 "加成交复盘",
+                "",
                 "e",
                 "",
                 "",

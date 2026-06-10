@@ -14,7 +14,7 @@ from .client import ApiError, BaseBuilderApiClient, poll_for_token
 from .config import CliConfig, DEFAULT_API_BASE, clear_token, load_config, save_config, state_dir
 from .create_flow import CreateFlow, CreateResult, ThreeElements, extract_message_id, extract_task_id, normalize_elements
 from .fingerprint import build_fingerprint
-from .intake import build_intake_prompt
+from .intake import build_intake_prompt, build_refine_instruction
 from .protocol import dumps, error_envelope, ok_envelope
 from .report import build_report, materialize_report_artifact, merge_copy_result, read_report, render_report_markdown, require_larkcli, write_report
 from .runs import list_runs, load_run, new_run_id, save_run
@@ -274,9 +274,19 @@ def cmd_create(args: argparse.Namespace) -> int:
     cfg = make_config(args)
     client = BaseBuilderApiClient(cfg.api_base, cfg.token)
     prompt_text = args.prompt
+    structured_input: dict[str, Any] | None = None
     if not prompt_text and not args.input and not args.file:
-        prompt_text = read_prompt()
-    prompt = build_intake_prompt(prompt=prompt_text, mode=args.mode, input_path=args.input, files=args.file)
+        if sys.stdin.isatty():
+            structured_input = read_template_input()
+        else:
+            prompt_text = read_prompt()
+    prompt = build_intake_prompt(
+        prompt=prompt_text,
+        mode=args.mode,
+        input_path=args.input,
+        files=args.file,
+        structured_input=structured_input,
+    )
     emitted_stdout = False
     if not args.auto_accept and sys.stdin.isatty():
         result, emitted_stdout = run_interactive_create(client, prompt, args.format)
@@ -293,6 +303,7 @@ def cmd_create(args: argparse.Namespace) -> int:
             "mode": args.mode,
             "input": args.input,
             "files": args.file,
+            "template": structured_input or {},
         },
         "elements": result.elements.to_dict(),
         "api_run": result.run,
@@ -457,7 +468,10 @@ def describe_payload() -> dict[str, Any]:
         "intake": {
             "modes": ["text", "excel"],
             "structuredInput": ["json"],
+            "templateFields": ["我想要构建", "我是", "业务场景", "痛点", "已有资料", "希望输出"],
             "files": ["csv", "xlsx", "txt", "md"],
+            "excel": "mode=excel requires at least one csv/xlsx file; multiple spreadsheet files are allowed",
+            "refineFiles": "three-elements optimize can include multiple supporting files",
         },
         "artifacts": {
             "report": "report.json is the source for manual and per-Base Skill generation",
@@ -511,6 +525,23 @@ def read_prompt() -> str:
     return read_line("请输入要搭建的业务系统需求: ").strip()
 
 
+def read_template_input() -> dict[str, Any]:
+    want_to_build = read_line("我想要构建: ").strip()
+    role = read_line("我是/我们是: ").strip()
+    scenario = read_line("业务场景/当前流程(可选): ").strip()
+    pain_points = parse_multi_value(read_line("痛点(多个用逗号分隔，可选): ").strip())
+    existing_materials = read_line("已有资料(可选): ").strip()
+    desired_outputs = parse_multi_value(read_line("希望输出(多个用逗号分隔，可选): ").strip())
+    return {
+        "我想要构建": want_to_build,
+        "我是": role,
+        "业务场景": scenario,
+        "痛点": pain_points,
+        "已有资料": existing_materials,
+        "希望输出": desired_outputs,
+    }
+
+
 def run_interactive_create(client: BaseBuilderApiClient, prompt: str, fmt: str) -> tuple[CreateResult, bool]:
     analyze_response = client.analyze(prompt)
     elements = normalize_elements(analyze_response)
@@ -536,7 +567,9 @@ def run_interactive_create(client: BaseBuilderApiClient, prompt: str, fmt: str) 
             continue
         if action in {"o", "optimize"}:
             instruction = read_line("请输入优化方向: ").strip()
-            optimize_response = client.optimize(elements, instruction, message_id=message_id or None, task_id=task_id or None)
+            file_text = read_line("可选补充文件路径(多个用逗号分隔，回车跳过): ").strip()
+            refine_instruction = build_refine_instruction(instruction=instruction, files=parse_multi_value(file_text))
+            optimize_response = client.optimize(elements, refine_instruction, message_id=message_id or None, task_id=task_id or None)
             elements = normalize_elements(optimize_response)
             message_id = extract_message_id(optimize_response) or message_id
             task_id = extract_task_id(optimize_response) or task_id
@@ -573,6 +606,13 @@ def emit_create_stage(fmt: str, operation: str, data: dict[str, Any], meta: dict
 def read_line(prompt: str) -> str:
     print(prompt, end="", file=sys.stderr, flush=True)
     return input()
+
+
+def parse_multi_value(text: str) -> list[str]:
+    if not text.strip():
+        return []
+    normalized = text.replace("；", ",").replace("，", ",").replace("\n", ",")
+    return [part.strip() for part in normalized.split(",") if part.strip()]
 
 
 def default_device_name() -> str:

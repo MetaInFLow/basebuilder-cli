@@ -39,7 +39,7 @@ pipx install --force git+https://github.com/MetaInFLow/basebuilder-cli.git
 basebuilder login
 basebuilder whoami --format json
 basebuilder agent register
-basebuilder create --prompt "搭建一个客户成功续费风险跟进系统" --format ndjson
+basebuilder create --input input.json --format ndjson
 ```
 
 生产环境不需要配置 API 地址。本地联调才显式覆盖：
@@ -53,7 +53,7 @@ export BB_API_BASE=http://127.0.0.1:8999
 
 ### 多输入和 Excel/CSV 模式
 
-结构化输入：
+结构化输入贴近 GUI 人类首屏模版，不要把这些字段提前拼成一句长 prompt：
 
 ```bash
 basebuilder create --input input.json --format ndjson
@@ -64,21 +64,28 @@ basebuilder create --input input.json --format ndjson
 ```json
 {
   "mode": "text",
-  "title": "客户成功续费跟进系统",
-  "scenario": "小型客户成功团队管理续费风险",
-  "goals": ["统一客户健康度", "跟进高风险续费动作"],
+  "我想要构建": "客户成功续费跟进系统",
+  "我是": "客户成功团队负责人",
+  "业务场景": "续费前 90 天识别风险并跟进",
+  "痛点": ["续费风险靠人工记忆", "跟进动作分散在聊天记录"],
+  "已有资料": "历史客户清单、续费记录、服务备注",
+  "希望输出": ["客户健康度视图", "高风险续费跟进表"],
   "constraints": ["不处理财务收款"]
 }
 ```
+
+CLI 仍保留 `--prompt` 作为兼容入口；新 agent 或正式使用应优先生成上述 `input.json`。
 
 Excel/CSV 结构优先模式：
 
 ```bash
 basebuilder create --mode excel --file renewal.csv --format ndjson
-basebuilder create --mode excel --file workbook.xlsx --format ndjson
+basebuilder create --mode excel --file workbook.xlsx --file renewal.csv --file tickets.csv --format ndjson
 ```
 
-`--mode excel` 会把表格结构作为 source of truth 写入 intake prompt。普通文本需求附带文件时，用 `--mode text --file spec.md`，表示文件只是背景上下文。
+`--mode excel` 会把一个或多个表格文件作为共同的 source of truth 写入结构化 intake envelope。普通文本需求附带文件时，用 `--mode text --file spec.md --file notes.md`，表示文件只是背景上下文。
+
+三要素页面动态修改时也可以继续丢文件。交互模式里选择 `optimize` 后，CLI 会询问可选补充文件路径，多个路径用逗号分隔；agent 自动化调用 `CreateFlow` 时可以传 `{"action":"optimize","instruction":"...","files":["a.md","b.csv"]}`。
 
 ### 进度、Report 和产物
 

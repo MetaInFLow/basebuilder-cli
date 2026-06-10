@@ -1,4 +1,6 @@
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -95,6 +97,35 @@ class CreateFlowTest(unittest.TestCase):
         self.assertEqual(api.calls[1][3], "task_inventory")
         self.assertEqual(api.calls[2][2], 456)
         self.assertEqual(api.calls[2][3], "task_inventory")
+
+    def test_optimize_can_include_multiple_file_contexts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            spec_path = Path(tmp) / "renewal-notes.md"
+            spec_path.write_text("续费痛点：历史备注分散，需要沉淀续费风险。")
+            csv_path = Path(tmp) / "renewal.csv"
+            csv_path.write_text("客户名,续费日期,风险等级\nA公司,2026-07-01,高\n")
+            api = FakeApi()
+            flow = CreateFlow(api)
+
+            result = flow.run(
+                prompt="做一个客户成功续费系统",
+                decisions=[
+                    {
+                        "action": "optimize",
+                        "instruction": "根据附件补充续费风险字段",
+                        "files": [str(spec_path), str(csv_path)],
+                    },
+                ],
+            )
+
+        self.assertEqual(result.status, "needs_confirmation")
+        refine_payload = json.loads(api.calls[1][1])
+        self.assertEqual(refine_payload["schemaVersion"], "basebuilder.three_elements_refine.v1")
+        self.assertEqual(refine_payload["instruction"], "根据附件补充续费风险字段")
+        self.assertEqual([file["fileName"] for file in refine_payload["files"]], ["renewal-notes.md", "renewal.csv"])
+        encoded = json.dumps(refine_payload, ensure_ascii=False)
+        self.assertIn("续费痛点", encoded)
+        self.assertIn("风险等级", encoded)
 
     def test_create_reuses_analyze_message_id_for_build_start(self):
         api = MessageIdFakeApi()

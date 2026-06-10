@@ -62,15 +62,26 @@ class FakeAnalyzeClient:
 
 
 class IntakeReportLarkTest(unittest.TestCase):
-    def test_create_input_json_builds_prompt_from_structured_fields(self):
+    def test_skill_description_describes_when_to_use_basebuilder(self):
+        skill_text = (ROOT / "skills" / "basebuilder-cli" / "SKILL.md").read_text()
+        description_line = next(line for line in skill_text.splitlines() if line.startswith("description: "))
+
+        self.assertIn("Use when", description_line)
+        self.assertIn("BaseBuilder", description_line)
+        self.assertIn("business", description_line.lower())
+        self.assertNotIn("agent needs to use BaseBuilder CLI", description_line)
+        self.assertNotIn("log in", description_line.lower())
+
+    def test_create_input_json_uses_gui_template_fields_not_prompt_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:
             input_path = Path(tmp) / "input.json"
             input_path.write_text(json.dumps({
                 "mode": "text",
-                "title": "客户成功续费跟进系统",
-                "scenario": "小型客户成功团队管理续费风险",
-                "goals": ["统一客户健康度", "跟进高风险续费动作"],
-                "constraints": ["不处理财务收款"],
+                "我想要构建": "客户成功续费跟进系统",
+                "我是": "小型客户成功团队负责人",
+                "痛点": ["续费风险靠人工记忆", "跟进动作分散在聊天记录"],
+                "已有资料": "历史客户清单和续费记录",
+                "希望输出": ["客户健康度视图", "高风险续费跟进表"],
             }, ensure_ascii=False))
             out = io.StringIO()
 
@@ -80,15 +91,21 @@ class IntakeReportLarkTest(unittest.TestCase):
                         exit_code = cli.main(["create", "--input", str(input_path), "--format", "json"])
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("客户成功续费跟进系统", FakeAnalyzeClient.last_prompt)
-        self.assertIn("小型客户成功团队管理续费风险", FakeAnalyzeClient.last_prompt)
-        self.assertIn("统一客户健康度", FakeAnalyzeClient.last_prompt)
-        self.assertIn("不处理财务收款", FakeAnalyzeClient.last_prompt)
+        self.assertNotIn("【BaseBuilder CLI Intake】", FakeAnalyzeClient.last_prompt)
+        payload = json.loads(FakeAnalyzeClient.last_prompt)
+        self.assertEqual(payload["schemaVersion"], "basebuilder.intake.v1")
+        self.assertEqual(payload["mode"], "text")
+        self.assertEqual(payload["intakeTemplate"]["wantToBuild"], "客户成功续费跟进系统")
+        self.assertEqual(payload["intakeTemplate"]["role"], "小型客户成功团队负责人")
+        self.assertIn("续费风险靠人工记忆", payload["intakeTemplate"]["painPoints"])
+        self.assertIn("客户健康度视图", payload["intakeTemplate"]["desiredOutputs"])
 
-    def test_create_excel_csv_mode_sends_column_summary(self):
+    def test_create_excel_mode_keeps_multiple_files_as_schema_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
-            csv_path = Path(tmp) / "renewal.csv"
-            csv_path.write_text("客户名,续费日期,风险等级\nA公司,2026-07-01,高\n")
+            renewal_path = Path(tmp) / "renewal.csv"
+            renewal_path.write_text("客户名,续费日期,风险等级\nA公司,2026-07-01,高\n")
+            tickets_path = Path(tmp) / "tickets.csv"
+            tickets_path.write_text("工单号,客户名,处理状态\nT-1,A公司,处理中\n")
             out = io.StringIO()
 
             with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
@@ -99,17 +116,34 @@ class IntakeReportLarkTest(unittest.TestCase):
                             "--mode",
                             "excel",
                             "--file",
-                            str(csv_path),
+                            str(renewal_path),
+                            "--file",
+                            str(tickets_path),
                             "--format",
                             "json",
                         ])
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("mode=excel", FakeAnalyzeClient.last_prompt)
-        self.assertIn("source of truth", FakeAnalyzeClient.last_prompt)
-        self.assertIn("客户名", FakeAnalyzeClient.last_prompt)
-        self.assertIn("续费日期", FakeAnalyzeClient.last_prompt)
-        self.assertIn("风险等级", FakeAnalyzeClient.last_prompt)
+        payload = json.loads(FakeAnalyzeClient.last_prompt)
+        self.assertEqual(payload["mode"], "excel")
+        self.assertEqual(payload["sourceTruth"], "uploaded_spreadsheets")
+        self.assertEqual([file["fileName"] for file in payload["files"]], ["renewal.csv", "tickets.csv"])
+        self.assertTrue(all(file["sourceRole"] == "schema_source" for file in payload["files"]))
+        encoded = json.dumps(payload, ensure_ascii=False)
+        self.assertIn("续费日期", encoded)
+        self.assertIn("处理状态", encoded)
+
+    def test_create_excel_mode_requires_spreadsheet_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                with contextlib.redirect_stdout(out):
+                    exit_code = cli.main(["create", "--mode", "excel", "--prompt", "复刻现有台账", "--format", "json"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["error"]["code"], "INTAKE_EXCEL_FILE_REQUIRED")
 
     def test_report_generate_and_render_from_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,13 +1,13 @@
 ---
 name: basebuilder-cli
-description: Use when an agent needs to use BaseBuilder CLI to log in, register an agent device, create BaseBuilder multi-dimensional tables, inspect runs, or generate manual and per-Base Skill artifacts.
+description: Use when a user wants BaseBuilder to turn a business workflow, spreadsheet, role/scenario/pain-point template, existing files, or operating process into a multidimensional business base.
 ---
 
 # BaseBuilder CLI
 
 ## Overview
 
-使用 `basebuilder` 作为 BaseBuilder 用户工作流的唯一命令行入口。用户态 AI 请求必须进入 `https://www.basebuilder.cn` 背后的产品 API；不要直连 Builder 服务。
+使用 `basebuilder` 作为 BaseBuilder 用户工作流的唯一命令行入口。触发条件是用户要把业务流程、Excel/CSV、角色/场景/痛点模版或已有资料转成可运营的多维业务表。用户态 AI 请求必须进入 `https://www.basebuilder.cn` 背后的产品 API；不要直连 Builder 服务。
 
 ## Install Or Verify
 
@@ -36,10 +36,22 @@ pipx install git+https://github.com/MetaInFLow/basebuilder-cli.git
 
 ## Create A Base
 
-Agent 调用时优先使用结构化输出：
+Agent 调用时优先使用结构化输入，不要把首页的一组字段拼成一句大 prompt。结构化 `input.json` 应贴近 GUI 首屏模版：
+
+```json
+{
+  "mode": "text",
+  "我想要构建": "客户成功续费跟进系统",
+  "我是": "客户成功团队负责人",
+  "业务场景": "续费前 90 天识别风险并跟进",
+  "痛点": ["风险靠人工记忆", "跟进动作散落在聊天记录"],
+  "已有资料": "历史客户清单、续费记录、服务备注",
+  "希望输出": ["客户健康度视图", "高风险续费跟进表"]
+}
+```
 
 ```bash
-basebuilder create --prompt "用户的业务系统需求" --format ndjson
+basebuilder create --input input.json --format ndjson
 ```
 
 用户确认三要素前不要使用 `--auto-accept`，除非用户明确要求跳过 review。非交互自动化里，先展示拆解出的管理对象、流程和字段，拿到确认后再继续。
@@ -48,11 +60,12 @@ basebuilder create --prompt "用户的业务系统需求" --format ndjson
 
 ```bash
 basebuilder create --input input.json --format ndjson
-basebuilder create --mode excel --file workbook.xlsx --format ndjson
-basebuilder create --mode excel --file data.csv --format ndjson
+basebuilder create --mode excel --file workbook.xlsx --file data.csv --format ndjson
 ```
 
-`--mode excel` 表示表格结构是 source of truth；普通需求带文件时使用 `--mode text --file spec.md`，文件只是背景上下文。
+`--mode excel` 表示上传的一个或多个表格文件共同作为 source of truth；普通需求带文件时使用 `--mode text --file spec.md --file notes.md`，文件只是背景上下文。
+
+三要素修改时也可以加入文件上下文。交互模式选择 `optimize` 后，按提示填写一个或多个文件路径；非交互 agent flow 使用带 `files` 的 optimize decision，不要把文件内容手工塞进一句 instruction。
 
 ## Resume And Artifacts
 
