@@ -494,10 +494,11 @@ def emit(fmt: str, operation: str, data: Any, *, human: str) -> int:
 
 
 def compact_progress_data(data: dict[str, Any]) -> dict[str, Any]:
-    raw = data.get("data") if isinstance(data.get("data"), dict) else data
+    raw = unwrap_progress_payload(data)
     last_event = last_answer_event(raw)
     delivery = first_mapping(raw.get("delivery"), last_event.get("delivery"))
     delivery_data = first_mapping(delivery.get("data"))
+    snapshot = first_mapping(raw.get("snapshot"))
 
     result: dict[str, Any] = {}
     copy_first(result, "status", raw, last_event, keys=["status", "state", "queue_state"])
@@ -510,8 +511,8 @@ def compact_progress_data(data: dict[str, Any]) -> dict[str, Any]:
     copy_first(result, "requestId", raw, keys=["request_id", "requestId"])
     copy_first(result, "buildRunId", raw, last_event, keys=["run_id", "buildRunId"])
     copy_first(result, "messageId", raw, keys=["message_id", "messageId"])
-    copy_first(result, "baseUrl", raw, delivery_data, keys=["baseUrl", "base_url", "url", "app_url", "feishu_url"])
-    copy_first(result, "tableName", raw, delivery_data, keys=["table_name", "tableName", "name"])
+    copy_first(result, "baseUrl", raw, delivery_data, snapshot, keys=["baseUrl", "base_url", "url", "app_url", "feishu_url"])
+    copy_first(result, "tableName", raw, delivery_data, snapshot, keys=["table_name", "tableName", "name"])
 
     cursor = first_mapping(raw.get("snapshot_cursor"))
     if cursor:
@@ -543,7 +544,48 @@ def compact_progress_data(data: dict[str, Any]) -> dict[str, Any]:
 
     if not result:
         return {key: value for key, value in data.items() if key not in {"answer_text", "problem_text"}}
+    normalize_finalized_delivery(result)
     return result
+
+
+def unwrap_progress_payload(data: dict[str, Any]) -> dict[str, Any]:
+    raw = data
+    for _ in range(6):
+        nested = raw.get("data") if isinstance(raw.get("data"), dict) else None
+        if not nested:
+            break
+        nested_has_progress = any(key in nested for key in (
+            "status",
+            "state",
+            "queue_state",
+            "current_step",
+            "last_success_step",
+            "snapshot",
+            "answer_text",
+            "delivery",
+            "artifact_counts",
+        ))
+        raw_is_envelope = any(key in raw for key in ("ok", "success", "operation", "code"))
+        if nested_has_progress or raw_is_envelope:
+            raw = nested
+            continue
+        break
+    return raw
+
+
+def normalize_finalized_delivery(result: dict[str, Any]) -> None:
+    last_success = str(result.get("lastSuccessStep") or "")
+    status = str(result.get("status") or "").lower()
+    has_delivery = bool(result.get("baseUrl") and result.get("tableName"))
+    counts = result.get("artifactCounts")
+    has_schema_artifacts = isinstance(counts, dict) and any(int(counts.get(key) or 0) > 0 for key in ("table", "field", "view"))
+
+    if last_success == "fast_build.finalize" and has_delivery and status in {"", "failed", "failure", "error", "processing"}:
+        result["status"] = "success"
+        result["currentStep"] = "fast_build.finalize"
+        result.setdefault("message", "完成搭建")
+        if has_schema_artifacts:
+            result["progress"] = 100
 
 
 def last_answer_event(data: dict[str, Any]) -> dict[str, Any]:

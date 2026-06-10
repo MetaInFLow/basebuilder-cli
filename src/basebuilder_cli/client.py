@@ -182,11 +182,7 @@ def _as_mapping(value: Any) -> dict[str, Any]:
 
 
 def _is_terminal_snapshot(payload: dict[str, Any]) -> bool:
-    candidates = [payload]
-    for key in ("data", "snapshot", "_runtime", "runtime"):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            candidates.append(value)
+    candidates = _snapshot_candidates(payload)
 
     terminal = {
         "success",
@@ -214,6 +210,13 @@ def _is_terminal_snapshot(payload: dict[str, Any]) -> bool:
         "granted",
     }
 
+    has_finalized_delivery = any(
+        str(candidate.get("last_success_step") or candidate.get("lastSuccessStep") or "") == "fast_build.finalize"
+        for candidate in candidates
+    ) and any(_candidate_url(candidate) for candidate in candidates)
+    if has_finalized_delivery:
+        return True
+
     for candidate in candidates:
         for key in ("status", "state", "queue_state"):
             status = str(candidate.get(key) or "").strip().lower()
@@ -230,3 +233,31 @@ def _is_terminal_snapshot(payload: dict[str, Any]) -> bool:
             continue
 
     return False
+
+
+def _snapshot_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    stack = [payload]
+    seen: set[int] = set()
+    while stack and len(candidates) < 16:
+        value = stack.pop(0)
+        if not isinstance(value, dict) or id(value) in seen:
+            continue
+        seen.add(id(value))
+        candidates.append(value)
+        for key in ("data", "snapshot", "_runtime", "runtime", "delivery", "ready"):
+            child = value.get(key)
+            if isinstance(child, dict):
+                stack.append(child)
+    return candidates
+
+
+def _candidate_url(candidate: dict[str, Any]) -> str:
+    return str(
+        candidate.get("baseUrl")
+        or candidate.get("base_url")
+        or candidate.get("app_url")
+        or candidate.get("feishu_url")
+        or candidate.get("url")
+        or ""
+    )

@@ -14,7 +14,7 @@ class NoBuilderUrlTest(unittest.TestCase):
             "ai." + "basebuilder.cn",
         ]
         checked = []
-        for path in [ROOT / "src", ROOT / "tests", ROOT / "README.md"]:
+        for path in [ROOT / "src", ROOT / "tests", ROOT / "README.md", ROOT / "skills"]:
             if path.is_dir():
                 files = [p for p in path.rglob("*") if p.is_file()]
             elif path.exists():
