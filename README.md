@@ -51,6 +51,76 @@ export BB_API_BASE=http://127.0.0.1:8999
 
 本地状态默认写入 `~/.basebuilder`。生成的 manual 和 Skill 可能包含 Base URL、表结构和业务字段，不要写到共享目录。
 
+### 多输入和 Excel/CSV 模式
+
+结构化输入：
+
+```bash
+basebuilder create --input input.json --format ndjson
+```
+
+`input.json` 示例：
+
+```json
+{
+  "mode": "text",
+  "title": "客户成功续费跟进系统",
+  "scenario": "小型客户成功团队管理续费风险",
+  "goals": ["统一客户健康度", "跟进高风险续费动作"],
+  "constraints": ["不处理财务收款"]
+}
+```
+
+Excel/CSV 结构优先模式：
+
+```bash
+basebuilder create --mode excel --file renewal.csv --format ndjson
+basebuilder create --mode excel --file workbook.xlsx --format ndjson
+```
+
+`--mode excel` 会把表格结构作为 source of truth 写入 intake prompt。普通文本需求附带文件时，用 `--mode text --file spec.md`，表示文件只是背景上下文。
+
+### 进度、Report 和产物
+
+```bash
+basebuilder create --prompt "..." --format ndjson
+basebuilder runs inspect <run_id> --format json
+basebuilder runs attach <run_id> --format ndjson
+basebuilder report generate <run_id> --out ./report.json
+basebuilder report render <run_id> --report ./report.json --out ./report.md
+basebuilder artifacts manual <run_id> --from-report ./report.json --out ./manual.md
+basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
+```
+
+`report.json` 是 manual 和 per-Base Skill 的机器真相源。它来自 API 返回的 sanitized final artifact，不包含 token、cookie、raw prompt 或内部 Builder 诊断。
+
+### 复制到自己的 Lark 空间
+
+CLI 不保存 Lark 凭据，只通过本地 `larkcli` / `lark-cli` 的 profile 做用户自有空间操作。当前安全纵切不猜测深复制命令；复制完成后，把本地 `copy-result.json` 合并进 report：
+
+```bash
+basebuilder lark copy <run_id> --report ./report.json --copy-result ./copy-result.json
+basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
+```
+
+`copy-result.json` 示例：
+
+```json
+{
+  "base": {
+    "url": "https://your-lark-space/base/copied",
+    "appToken": "copied_base_token"
+  },
+  "tableIdMap": {
+    "tbl_original": "tbl_copied"
+  },
+  "fieldIdMap": {},
+  "viewIdMap": {}
+}
+```
+
+如果没有 `--copy-result`，CLI 会检查本地是否存在 `larkcli`。找不到时返回结构化 `LARKCLI_NOT_FOUND`；找得到但没有 copy result 时返回 `LARK_COPY_RESULT_REQUIRED`，让用户先通过本地 larkcli 完成交互式复制并导出 id map。
+
 ## Agent 注册
 
 ```bash
@@ -85,8 +155,9 @@ cp -R skills/basebuilder-cli/* ~/.agents/skills/basebuilder-cli/
 
 ```bash
 basebuilder runs inspect <run_id> --format json
+basebuilder report generate <run_id> --out ./report.json
 basebuilder artifacts manual <run_id> --out ./manual.md
-basebuilder artifacts skill <run_id> --out ./base-skill
+basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
 ```
 
 `skills/basebuilder-cli` 是“使用 CLI 的 Skill”；`basebuilder artifacts skill` 生成的是“操作某个具体多维表的 Skill”。后者可能包含 Base URL、表结构和业务字段，只保存到可信目录。

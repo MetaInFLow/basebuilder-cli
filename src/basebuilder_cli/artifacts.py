@@ -55,6 +55,7 @@ def render_manual(artifact: dict[str, Any]) -> str:
         "## 访问",
         "",
         f"- Base URL: {base.get('url') or '未提供'}",
+        f"- Base ID: {base.get('appToken') or base.get('baseId') or base.get('id') or '未提供'}",
         f"- 表数量: {summary.get('tables', len(tables))}",
         f"- 字段数量: {summary.get('fields', count_fields(tables))}",
         f"- 视图数量: {summary.get('views', count_views(tables))}",
@@ -120,6 +121,7 @@ def render_skill(artifact: dict[str, Any]) -> str:
         "## Base Summary",
         "",
         f"- Base URL: {base.get('url') or '未提供'}",
+        f"- Base ID: {base.get('appToken') or base.get('baseId') or base.get('id') or '未提供'}",
         f"- 核心表: {table_names or '见 schema'}",
         "",
         "## Tables, Fields, And Views",
@@ -129,6 +131,9 @@ def render_skill(artifact: dict[str, Any]) -> str:
         fields = table.get("fields") or []
         views = table.get("views") or []
         lines.append(f"### {table.get('name') or '未命名表'}")
+        table_id = table.get("tableId") or table.get("table_id")
+        if table_id:
+            lines.append(f"Table ID: `{table_id}`")
         description = str(table.get("description") or "").strip()
         if description:
             lines.append(description)
@@ -139,13 +144,17 @@ def render_skill(artifact: dict[str, Any]) -> str:
                 field_name = field.get("name") or ""
                 field_type = field.get("type") or "unknown"
                 field_desc = field.get("description") or ""
+                field_id = field.get("fieldId") or field.get("field_id")
                 suffix = f" - {field_desc}" if field_desc else ""
-                lines.append(f"- {field_name} ({field_type}){suffix}")
+                id_part = f" `{field_id}`" if field_id else ""
+                lines.append(f"- {field_name} ({field_type}){id_part}{suffix}")
         if views:
             lines.append("")
             lines.append("视图：")
             for view in views:
-                lines.append(f"- {view.get('name') or ''}: {view.get('type') or ''}")
+                view_id = view.get("viewId") or view.get("view_id")
+                id_part = f" `{view_id}`" if view_id else ""
+                lines.append(f"- {view.get('name') or ''}: {view.get('type') or ''}{id_part}")
         lines.append("")
 
     lines.extend([
@@ -182,6 +191,9 @@ def sanitize_artifact(value: Any) -> Any:
         clean: dict[str, Any] = {}
         for key, item in value.items():
             normalized = str(key).lower()
+            if normalized in {"apptoken", "baseid", "basetoken"}:
+                clean[key] = sanitize_artifact(item)
+                continue
             if any(fragment in normalized for fragment in SENSITIVE_KEY_FRAGMENTS):
                 continue
             clean[key] = sanitize_artifact(item)

@@ -44,17 +44,40 @@ basebuilder create --prompt "用户的业务系统需求" --format ndjson
 
 用户确认三要素前不要使用 `--auto-accept`，除非用户明确要求跳过 review。非交互自动化里，先展示拆解出的管理对象、流程和字段，拿到确认后再继续。
 
+多输入模式：
+
+```bash
+basebuilder create --input input.json --format ndjson
+basebuilder create --mode excel --file workbook.xlsx --format ndjson
+basebuilder create --mode excel --file data.csv --format ndjson
+```
+
+`--mode excel` 表示表格结构是 source of truth；普通需求带文件时使用 `--mode text --file spec.md`，文件只是背景上下文。
+
 ## Resume And Artifacts
 
 ```bash
 basebuilder runs list --format json
 basebuilder runs inspect <run_id> --format json
 basebuilder runs attach <run_id> --format ndjson
-basebuilder artifacts manual <run_id> --out ./manual.md
-basebuilder artifacts skill <run_id> --out ./base-skill
+basebuilder report generate <run_id> --out ./report.json
+basebuilder report render <run_id> --report ./report.json --out ./report.md
+basebuilder artifacts manual <run_id> --from-report ./report.json --out ./manual.md
+basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
 ```
 
 生成的 `base-skill` 是操作该具体 Base 的 per-Base Skill。读取或写入该 Base 记录前，先加载这个 Skill。
+
+## Lark Copy
+
+复制到用户自己的 Lark 空间由本地 `larkcli` / `lark-cli` 负责登录和授权，BaseBuilder CLI 不保存 Lark 凭据。复制完成后，把 id map 合并进 report：
+
+```bash
+basebuilder lark copy <run_id> --report ./report.json --copy-result ./copy-result.json
+basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
+```
+
+如果缺少 `larkcli` 或 copy result，停止并让用户完成本地交互式复制。不要猜测 Base/table/field/view id。
 
 ## Safety Rules
 

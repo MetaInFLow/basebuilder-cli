@@ -14,7 +14,9 @@ from .client import ApiError, BaseBuilderApiClient, poll_for_token
 from .config import CliConfig, DEFAULT_API_BASE, clear_token, load_config, save_config, state_dir
 from .create_flow import CreateFlow, CreateResult, ThreeElements, extract_message_id, extract_task_id, normalize_elements
 from .fingerprint import build_fingerprint
+from .intake import build_intake_prompt
 from .protocol import dumps, error_envelope, ok_envelope
+from .report import build_report, materialize_report_artifact, merge_copy_result, read_report, render_report_markdown, require_larkcli, write_report
 from .runs import list_runs, load_run, new_run_id, save_run
 
 
@@ -29,6 +31,9 @@ COMMANDS = [
     "runs attach",
     "artifacts manual",
     "artifacts skill",
+    "report generate",
+    "report render",
+    "lark copy",
     "agent register",
     "agent status",
     "agent unregister",
@@ -86,6 +91,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     create = sub.add_parser("create")
     create.add_argument("--prompt", default="")
+    create.add_argument("--input", default="", help="JSON structured intake file.")
+    create.add_argument("--mode", choices=["text", "excel"], default="text")
+    create.add_argument("--file", action="append", default=[])
     create.add_argument("--format", choices=["human", "json", "ndjson"], default="human")
     create.add_argument("--auto-accept", action="store_true")
     create.set_defaults(func=cmd_create, operation="builds.create")
@@ -108,12 +116,36 @@ def build_parser() -> argparse.ArgumentParser:
     artifacts_sub = artifacts.add_subparsers(dest="artifact_command", required=True)
     manual = artifacts_sub.add_parser("manual")
     manual.add_argument("run_id")
+    manual.add_argument("--from-report", default="")
     manual.add_argument("--out", required=True)
     manual.set_defaults(func=cmd_artifact_manual, operation="artifacts.manual")
     skill = artifacts_sub.add_parser("skill")
     skill.add_argument("run_id")
+    skill.add_argument("--from-report", default="")
     skill.add_argument("--out", required=True)
     skill.set_defaults(func=cmd_artifact_skill, operation="artifacts.skill")
+
+    report = sub.add_parser("report")
+    report_sub = report.add_subparsers(dest="report_command", required=True)
+    report_generate = report_sub.add_parser("generate")
+    report_generate.add_argument("run_id")
+    report_generate.add_argument("--out", required=True)
+    report_generate.set_defaults(func=cmd_report_generate, operation="report.generate")
+    report_render = report_sub.add_parser("render")
+    report_render.add_argument("run_id")
+    report_render.add_argument("--report", default="")
+    report_render.add_argument("--out", required=True)
+    report_render.set_defaults(func=cmd_report_render, operation="report.render")
+
+    lark = sub.add_parser("lark")
+    lark_sub = lark.add_subparsers(dest="lark_command", required=True)
+    lark_copy = lark_sub.add_parser("copy")
+    lark_copy.add_argument("run_id")
+    lark_copy.add_argument("--report", required=True)
+    lark_copy.add_argument("--copy-result", default="")
+    lark_copy.add_argument("--profile", default="")
+    lark_copy.add_argument("--target-folder", default="")
+    lark_copy.set_defaults(func=cmd_lark_copy, operation="lark.copy")
 
     agent = sub.add_parser("agent")
     agent_sub = agent.add_subparsers(dest="agent_command", required=True)
@@ -241,7 +273,10 @@ def cmd_whoami(args: argparse.Namespace) -> int:
 def cmd_create(args: argparse.Namespace) -> int:
     cfg = make_config(args)
     client = BaseBuilderApiClient(cfg.api_base, cfg.token)
-    prompt = args.prompt or read_prompt()
+    prompt_text = args.prompt
+    if not prompt_text and not args.input and not args.file:
+        prompt_text = read_prompt()
+    prompt = build_intake_prompt(prompt=prompt_text, mode=args.mode, input_path=args.input, files=args.file)
     emitted_stdout = False
     if not args.auto_accept and sys.stdin.isatty():
         result, emitted_stdout = run_interactive_create(client, prompt, args.format)
@@ -254,6 +289,11 @@ def cmd_create(args: argparse.Namespace) -> int:
     save_run(run_id, {
         "run_id": run_id,
         "prompt": prompt,
+        "intake": {
+            "mode": args.mode,
+            "input": args.input,
+            "files": args.file,
+        },
         "elements": result.elements.to_dict(),
         "api_run": result.run,
         "status": result.status,
@@ -326,17 +366,49 @@ def cmd_runs_attach(args: argparse.Namespace) -> int:
 
 
 def cmd_artifact_manual(args: argparse.Namespace) -> int:
-    artifact = artifact_for_run(args.run_id)
+    artifact = artifact_from_report_or_run(args.run_id, args.from_report)
     path = write_manual(artifact, args.out)
     print(dumps(ok_envelope("artifacts.manual", {"path": str(path)})))
     return 0
 
 
 def cmd_artifact_skill(args: argparse.Namespace) -> int:
-    artifact = artifact_for_run(args.run_id)
+    artifact = artifact_from_report_or_run(args.run_id, args.from_report)
     path = write_skill(artifact, args.out)
     print(dumps(ok_envelope("artifacts.skill", {"path": str(path)})))
     return 0
+
+
+def cmd_report_generate(args: argparse.Namespace) -> int:
+    artifact = artifact_for_run(args.run_id)
+    report = build_report(args.run_id, artifact)
+    path = write_report(report, args.out)
+    save_run(args.run_id, {"report": report})
+    print(dumps(ok_envelope("report.generate", {"path": str(path), "report": report}, {"runId": args.run_id})))
+    return 0
+
+
+def cmd_report_render(args: argparse.Namespace) -> int:
+    report = read_report(args.report) if args.report else report_for_run(args.run_id)
+    path = Path(args.out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_report_markdown(report))
+    print(dumps(ok_envelope("report.render", {"path": str(path)}, {"runId": args.run_id})))
+    return 0
+
+
+def cmd_lark_copy(args: argparse.Namespace) -> int:
+    if args.copy_result:
+        report = merge_copy_result(args.report, args.copy_result)
+        save_run(args.run_id, {"report": report})
+        print(dumps(ok_envelope("lark.copy", {"report": args.report, "copy": report.get("copy")}, {"runId": args.run_id})))
+        return 0
+    binary = require_larkcli()
+    raise ApiError(
+        "LARK_COPY_RESULT_REQUIRED",
+        f"已找到 {binary}，但当前 CLI 需要 --copy-result 来合并复制后的 Base/table/field/view id map。",
+        retryable=False,
+    )
 
 
 def cmd_ext_describe(args: argparse.Namespace) -> int:
@@ -363,12 +435,34 @@ def artifact_for_run(run_id: str) -> dict[str, Any]:
     return artifact
 
 
+def artifact_from_report_or_run(run_id: str, report_path: str = "") -> dict[str, Any]:
+    if report_path:
+        return materialize_report_artifact(read_report(report_path))
+    return artifact_for_run(run_id)
+
+
+def report_for_run(run_id: str) -> dict[str, Any]:
+    row = load_run(run_id)
+    if isinstance(row.get("report"), dict):
+        return row["report"]
+    return build_report(run_id, artifact_for_run(run_id))
+
+
 def describe_payload() -> dict[str, Any]:
     return {
         "name": "basebuilder-cli",
         "version": __version__,
         "commands": COMMANDS,
         "formats": ["human", "json", "ndjson"],
+        "intake": {
+            "modes": ["text", "excel"],
+            "structuredInput": ["json"],
+            "files": ["csv", "xlsx", "txt", "md"],
+        },
+        "artifacts": {
+            "report": "report.json is the source for manual and per-Base Skill generation",
+            "larkCopy": "copy metadata can be merged from local larkcli copy-result JSON",
+        },
         "local_state": "~/.basebuilder",
         "api": {
             "base": "weave-ai-api",
