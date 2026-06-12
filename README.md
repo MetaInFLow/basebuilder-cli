@@ -17,14 +17,14 @@ BaseBuilder CLI 是 BaseBuilder 注册用户的本地命令行客户端。用户
 
 ```bash
 pipx install git+https://github.com/MetaInFLow/basebuilder-cli.git
-basebuilder health --format json
+basebuilder doctor
 ```
 
 没有 `pipx` 时也可以用用户级 pip 安装：
 
 ```bash
 python3 -m pip install --user git+https://github.com/MetaInFLow/basebuilder-cli.git
-basebuilder health
+basebuilder doctor
 ```
 
 升级到 GitHub main 最新版本：
@@ -37,6 +37,7 @@ pipx install --force git+https://github.com/MetaInFLow/basebuilder-cli.git
 
 ```bash
 basebuilder login
+basebuilder doctor
 basebuilder whoami --format json
 basebuilder agent register
 basebuilder create --input input.json --format ndjson
@@ -50,6 +51,25 @@ export BB_API_BASE=http://127.0.0.1:8999
 ```
 
 本地状态默认写入 `~/.basebuilder`。生成的 manual 和 Skill 可能包含 Base URL、表结构和业务字段，不要写到共享目录。
+
+### Doctor 诊断
+
+遇到“不能用、登录失败、连不上、没次数、任务还在跑、run 断了”等问题，先运行：
+
+```bash
+basebuilder doctor
+basebuilder doctor --format json
+```
+
+`doctor` 会检查：
+
+- 当前 API 地址是否能连通，生产默认是 `https://www.basebuilder.cn`。
+- 本地是否已经登录，token 是否过期/吊销。
+- 当前账号是否还有可识别的构建次数；次数为 0 时会提示去 Web 充值。
+- 本地最近 run 是否仍在运行，并提示 `basebuilder runs attach <run_id>`。
+- 本地是否安装 `larkcli` / `lark-cli`，用于复制到自己的 Lark 空间。
+
+`doctor` 本身不会发起构建，也不会直连 Builder。它只读取本地状态，并通过 `weave-ai-api` 做健康、登录和 run snapshot 检查。
 
 ### 多输入和 Excel/CSV 模式
 

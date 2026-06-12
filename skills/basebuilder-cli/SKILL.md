@@ -13,7 +13,7 @@ description: Use when a user wants BaseBuilder to turn a business workflow, spre
 
 ```bash
 python3 -m pip install --user git+https://github.com/MetaInFLow/basebuilder-cli.git
-basebuilder health --format json
+basebuilder doctor --format json
 ```
 
 如果需要隔离安装，优先使用：
@@ -28,11 +28,28 @@ pipx install git+https://github.com/MetaInFLow/basebuilder-cli.git
 
 - 人类用户登录：`basebuilder login`
 - Agent 设备注册：`basebuilder agent register`
+- 诊断当前是否可用：`basebuilder doctor --format json`
 - 查看当前用户：`basebuilder whoami --format json`
 - 查看 Agent 状态：`basebuilder agent status --format json`
 - 退出并吊销本地 token：`basebuilder logout`
 
 浏览器授权页成功后可能会自动关闭，但登录是否完成只以 CLI 收到并保存 access token 为准。
+
+## Doctor First
+
+遇到连接失败、登录失败、次数不足、任务疑似还在跑、run attach 失败或用户不确定下一步时，先运行：
+
+```bash
+basebuilder doctor --format json
+```
+
+根据 `summary.status` 决策：
+
+- `ready`: 可以继续 `create`；如果 `runs.running` 非空，先 `basebuilder runs attach <run_id>` 看进度。
+- `needs_login`: 运行 `basebuilder login` 或 `basebuilder agent register`。
+- `offline`: 检查网络、`BB_API_BASE`、`--api-base`，生产应为 `https://www.basebuilder.cn`。
+- `no_credits`: 打开 Web 账户页充值或购买次数后再创建。
+- `ready_with_warnings`: API 和登录可用，但还有非阻塞问题，按 `summary.nextSteps` 处理。
 
 ## Create A Base
 

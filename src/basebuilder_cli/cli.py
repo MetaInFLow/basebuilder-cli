@@ -13,6 +13,7 @@ from .artifacts import write_manual, write_skill
 from .client import ApiError, BaseBuilderApiClient, poll_for_token
 from .config import CliConfig, DEFAULT_API_BASE, clear_token, load_config, save_config, state_dir
 from .create_flow import CreateFlow, CreateResult, ThreeElements, extract_message_id, extract_task_id, normalize_elements
+from .doctor import DoctorOptions, render_doctor_human, run_doctor
 from .fingerprint import build_fingerprint
 from .intake import build_intake_prompt, build_refine_instruction
 from .protocol import dumps, error_envelope, ok_envelope
@@ -22,6 +23,7 @@ from .runs import list_runs, load_run, new_run_id, save_run
 
 COMMANDS = [
     "health",
+    "doctor",
     "login",
     "logout",
     "whoami",
@@ -76,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
     health = sub.add_parser("health")
     health.add_argument("--format", choices=["human", "json"], default="human")
     health.set_defaults(func=cmd_health, operation="health")
+
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("--format", choices=["human", "json"], default="human")
+    doctor.add_argument("--max-runs", type=int, default=5)
+    doctor.set_defaults(func=cmd_doctor, operation="doctor")
 
     login = sub.add_parser("login")
     login.add_argument("--no-open", action="store_true")
@@ -181,6 +188,19 @@ def cmd_health(args: argparse.Namespace) -> int:
         "commands": COMMANDS,
     }
     return emit(args.format, "health", data, human=f"basebuilder-cli {__version__} api={data['api_base']}")
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    report = run_doctor(
+        config=make_config(args),
+        api_factory=BaseBuilderApiClient,
+        options=DoctorOptions(max_runs=max(0, int(args.max_runs or 0))),
+    )
+    if args.format == "json":
+        print(dumps(ok_envelope("doctor", report)))
+    else:
+        print(render_doctor_human(report))
+    return 0
 
 
 def cmd_login(args: argparse.Namespace) -> int:
@@ -492,6 +512,11 @@ def describe_payload() -> dict[str, Any]:
                 "fingerprint": "hash-only local fingerprint; raw MAC/hostname/username are not sent",
                 "urls": ["verificationUrl", "loginUrl", "registerUrl", "rechargeUrl"],
             },
+        },
+        "doctor": {
+            "command": "basebuilder doctor --format json",
+            "checks": ["api", "auth", "credits", "runs", "larkcli"],
+            "status": ["ready", "ready_with_warnings", "needs_login", "offline", "no_credits"],
         },
     }
 
