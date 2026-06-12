@@ -18,6 +18,7 @@ BaseBuilder CLI 是 BaseBuilder 注册用户的本地命令行客户端。用户
 ```bash
 pipx install git+https://github.com/MetaInFLow/basebuilder-cli.git
 basebuilder doctor
+basebuilder skill install --target codex
 ```
 
 没有 `pipx` 时也可以用用户级 pip 安装：
@@ -25,6 +26,7 @@ basebuilder doctor
 ```bash
 python3 -m pip install --user git+https://github.com/MetaInFLow/basebuilder-cli.git
 basebuilder doctor
+basebuilder skill install --target codex
 ```
 
 升级到 GitHub main 最新版本：
@@ -39,9 +41,10 @@ pipx install --force git+https://github.com/MetaInFLow/basebuilder-cli.git
 basebuilder login
 basebuilder doctor
 basebuilder whoami --format json
-basebuilder agent register
 basebuilder create --input input.json --format ndjson
 ```
+
+`basebuilder login` 成功后会自动为本机 agent 注册/轮换 agent token，不需要用户再打开一个 agent 注册确认页。只有 `doctor` 提示 token 缺失、吊销或需要重新注册时，才单独运行 `basebuilder agent register`。
 
 生产环境不需要配置 API 地址。本地联调才显式覆盖：
 
@@ -86,15 +89,28 @@ basebuilder create --input input.json --format ndjson
   "mode": "text",
   "我想要构建": "客户成功续费跟进系统",
   "我是": "客户成功团队负责人",
-  "业务场景": "续费前 90 天识别风险并跟进",
-  "痛点": ["续费风险靠人工记忆", "跟进动作分散在聊天记录"],
+  "主要使用者": "客户成功经理、销售主管",
+  "业务背景": "续费前 90 天识别风险并跟进",
+  "核心痛点": ["续费风险靠人工记忆", "跟进动作分散在聊天记录"],
   "已有资料": "历史客户清单、续费记录、服务备注",
   "希望输出": ["客户健康度视图", "高风险续费跟进表"],
-  "constraints": ["不处理财务收款"]
+  "constraints": ["不处理财务收款"],
+  "背景知识": "企业客户续费通常需要提前触达使用率下降和关键人变更。"
 }
 ```
 
 CLI 仍保留 `--prompt` 作为兼容入口；新 agent 或正式使用应优先生成上述 `input.json`。
+
+### AI 方案初稿确认
+
+CLI 里的“AI 方案初稿”就是 Web 里的三要素页面。它会等待 API 流式分析完成后输出：
+
+- 管理对象
+- 管理流程
+- 关键信息
+- 背景知识
+
+默认不会直接开始搭建。用户需要在交互模式输入 `accept`，或明确使用 `--auto-accept`，才会进入生成。需要修改时可以选择 `edit`，或用 `optimize` 加一句调整要求；`optimize` 可以继续附加多个文件作为上下文。
 
 Excel/CSV 结构优先模式：
 
@@ -128,6 +144,7 @@ CLI 不保存 Lark 凭据，只通过本地 `larkcli` / `lark-cli` 的 profile �
 ```bash
 basebuilder lark copy <run_id> --report ./report.json --copy-result ./copy-result.json
 basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
+basebuilder skill install --source ./base-skill --target codex
 ```
 
 `copy-result.json` 示例：
@@ -156,7 +173,7 @@ basebuilder agent status --format json
 basebuilder agent unregister
 ```
 
-`agent register` 会向 `weave-ai-api` 发起 `intent=agent_register` 的 device session，并打印/打开授权、登录、注册和充值 URL。生产 URL 仍然来自 `https://www.basebuilder.cn`；本地 `127.*` 只在显式 dev override 下出现。
+有有效 token 时，`agent register` 会直接调用受保护 API 完成本机 agent 注册/轮换，不再弹出浏览器确认。没有 token 时，它才会向 `weave-ai-api` 发起 `intent=agent_register` 的 device session，并打印/打开授权、登录、注册和充值 URL。生产 URL 仍然来自 `https://www.basebuilder.cn`；本地 `127.*` 只在显式 dev override 下出现。
 
 CLI 会在本地计算隐私安全指纹，只上传 `fingerprint_hash` 和低敏摘要，不上传 raw MAC、hostname、username、环境变量、cookie 或 secret。
 
@@ -167,15 +184,13 @@ CLI 会在本地计算隐私安全指纹，只上传 `fingerprint_hash` 和低�
 安装到 Codex 本地 Skills：
 
 ```bash
-mkdir -p ~/.codex/skills/basebuilder-cli
-cp -R skills/basebuilder-cli/* ~/.codex/skills/basebuilder-cli/
+basebuilder skill install --target codex
 ```
 
 安装到通用 agents skills 目录：
 
 ```bash
-mkdir -p ~/.agents/skills/basebuilder-cli
-cp -R skills/basebuilder-cli/* ~/.agents/skills/basebuilder-cli/
+basebuilder skill install --target agents
 ```
 
 生成某个具体 Base 的专用 Skill：
@@ -185,6 +200,7 @@ basebuilder runs inspect <run_id> --format json
 basebuilder report generate <run_id> --out ./report.json
 basebuilder artifacts manual <run_id> --out ./manual.md
 basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
+basebuilder skill install --source ./base-skill --target codex
 ```
 
 `skills/basebuilder-cli` 是“使用 CLI 的 Skill”；`basebuilder artifacts skill` 生成的是“操作某个具体多维表的 Skill”。后者可能包含 Base URL、表结构和业务字段，只保存到可信目录。

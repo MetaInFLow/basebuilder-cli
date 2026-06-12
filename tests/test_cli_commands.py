@@ -29,6 +29,7 @@ class FakeCreateClient:
                 "manage_what": "管理跨境电商 SKU 与库存",
                 "workflow": "录入 SKU -> 同步库存 -> 预警补货",
                 "fields": "SKU编码、仓库、库存、补货阈值",
+                "background_knowledge": "跨境电商库存需要按仓库和补货阈值预警。",
             }
         }
 
@@ -165,6 +166,53 @@ class FakeAgentClient:
         }
 
 
+class FakeLoginAutoAgentClient:
+    last_agent_payload = None
+    init_tokens = []
+
+    def __init__(self, api_base, token=""):
+        self.api_base = api_base
+        self.token = token
+        FakeLoginAutoAgentClient.init_tokens.append(token)
+
+    def device_start(self, device_name, **kwargs):
+        return {
+            "device_code": "bbdc_login",
+            "user_code": "LOGIN-OK",
+            "verification_url": "https://www.basebuilder.cn/cli/approve?user_code=LOGIN-OK",
+            "expires_at": 9999999999,
+            "poll_interval": 1,
+        }
+
+    def device_poll(self, device_code):
+        return {
+            "status": "approved",
+            "access_token": "human_token",
+            "expires_at": 1780979999,
+        }
+
+    def agent_upsert(self, device_name, fingerprint_hash, fingerprint_signals):
+        FakeLoginAutoAgentClient.last_agent_payload = {
+            "token": self.token,
+            "device_name": device_name,
+            "fingerprint_hash": fingerprint_hash,
+            "fingerprint_signals": fingerprint_signals,
+        }
+        if "hostname" in fingerprint_signals or "username" in fingerprint_signals or "mac" in fingerprint_signals:
+            raise AssertionError("raw fingerprint signal leaked to authenticated agent upsert")
+        return {
+            "access_token": "agent_token",
+            "client_kind": "agent",
+            "agent_identity_id": "agent_123",
+            "fingerprint_hash": fingerprint_hash,
+        }
+
+
+class FakeAuthenticatedAgentClient(FakeLoginAutoAgentClient):
+    def device_start(self, device_name, **kwargs):
+        raise AssertionError("authenticated agent register must not start a device approval session")
+
+
 class FakeAuthErrorClient:
     def __init__(self, api_base, token=""):
         self.api_base = api_base
@@ -263,6 +311,10 @@ class CliCommandTest(unittest.TestCase):
         self.assertIn("snapshot 30%: 创建数据表", text)
         self.assertIn("https://metainflow.feishu.cn/base/sample", text)
         self.assertIn("summary tables=2 fields=5 views=3", text)
+        self.assertIn("请先检查生成的多维表", text)
+        self.assertIn("basebuilder lark copy message_123", text)
+        self.assertIn("确认是否让自己的 agent 学习这个表", text)
+        self.assertIn("basebuilder artifacts skill message_123", text)
 
     def test_interactive_ndjson_create_supports_optimize_edit_accept_without_stdout_prompts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,9 +324,13 @@ class CliCommandTest(unittest.TestCase):
                 "客户线索 CRM",
                 "销售运营",
                 "",
+                "",
                 "线索分散",
                 "",
                 "线索表",
+                "",
+                "",
+                "",
                 "o",
                 "加成交复盘",
                 "",
@@ -282,6 +338,7 @@ class CliCommandTest(unittest.TestCase):
                 "",
                 "",
                 "客户名、阶段、成交金额",
+                "",
                 "a",
             ])
             with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
@@ -335,6 +392,33 @@ class CliCommandTest(unittest.TestCase):
         self.assertEqual(result.status, "needs_confirmation")
         self.assertEqual(result.run, {})
         self.assertNotIn("start_build", [call[0] for call in client.calls])
+
+    def test_create_json_stops_at_ai_blueprint_draft_until_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            input_path = Path(tmp) / "input.json"
+            input_path.write_text(json.dumps({
+                "mode": "text",
+                "我想要构建": "跨境电商进销存",
+                "我是": "运营负责人",
+                "主要使用者": "采购、仓库、运营",
+                "业务背景": "多仓库存和补货节奏需要统一管理",
+                "核心痛点": ["库存分散", "低库存预警不及时"],
+                "背景知识": "海外仓补货周期长，需要提前预警。",
+            }, ensure_ascii=False))
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeCreateClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main(["create", "--input", str(input_path), "--format", "json"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["data"]["status"], "needs_confirmation")
+        self.assertEqual(payload["data"]["stage"], "ai_blueprint_draft")
+        self.assertTrue(payload["data"]["confirmationRequired"])
+        self.assertIn("backgroundKnowledge", payload["data"]["elements"])
+        self.assertIn("确认方案", "\n".join(payload["data"]["nextSteps"]))
+        self.assertEqual(payload["data"]["run"], {})
 
     def test_runs_inspect_fetches_api_snapshot_when_token_available(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -414,6 +498,47 @@ class CliCommandTest(unittest.TestCase):
         self.assertNotIn('"hostname"', encoded)
         self.assertNotIn('"username"', encoded)
         self.assertNotIn('"mac"', encoded)
+
+    def test_login_auto_registers_agent_without_second_confirmation(self):
+        FakeLoginAutoAgentClient.last_agent_payload = None
+        FakeLoginAutoAgentClient.init_tokens = []
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeLoginAutoAgentClient):
+                    with mock.patch.object(cli.webbrowser, "open") as opened:
+                        with contextlib.redirect_stdout(out):
+                            exit_code = cli.main(["login", "--no-open"])
+                saved = cli.load_config()
+
+        self.assertEqual(exit_code, 0)
+        opened.assert_not_called()
+        self.assertEqual(saved.token, "agent_token")
+        self.assertEqual(FakeLoginAutoAgentClient.last_agent_payload["token"], "human_token")
+        self.assertTrue(str(FakeLoginAutoAgentClient.last_agent_payload["fingerprint_hash"]).startswith("sha256:"))
+        self.assertIn("Agent 自动注册成功", out.getvalue())
+        self.assertNotIn("再次打开", out.getvalue())
+
+    def test_agent_register_uses_authenticated_upsert_when_logged_in(self):
+        FakeLoginAutoAgentClient.last_agent_payload = None
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_config(cli.CliConfig(api_base="https://www.basebuilder.cn", token="human_token"))
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeAuthenticatedAgentClient):
+                    with mock.patch.object(cli.webbrowser, "open") as opened:
+                        with contextlib.redirect_stdout(out):
+                            exit_code = cli.main(["agent", "register", "--format", "json"])
+                saved = cli.load_config()
+
+        self.assertEqual(exit_code, 0)
+        opened.assert_not_called()
+        self.assertEqual(saved.token, "agent_token")
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["operation"], "agents.register")
+        self.assertEqual(payload["data"]["mode"], "authenticated")
+        self.assertEqual(payload["data"]["client_kind"], "agent")
+        self.assertEqual(FakeLoginAutoAgentClient.last_agent_payload["token"], "human_token")
 
     def test_revoked_token_request_returns_structured_error_envelope(self):
         with tempfile.TemporaryDirectory() as tmp:

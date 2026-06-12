@@ -14,26 +14,28 @@ description: Use when a user wants BaseBuilder to turn a business workflow, spre
 ```bash
 python3 -m pip install --user git+https://github.com/MetaInFLow/basebuilder-cli.git
 basebuilder doctor --format json
+basebuilder skill install --target codex
 ```
 
 如果需要隔离安装，优先使用：
 
 ```bash
 pipx install git+https://github.com/MetaInFLow/basebuilder-cli.git
+basebuilder skill install --target codex
 ```
 
 生产环境不需要配置 `BB_API_BASE`。只有明确做本地 smoke 时，才允许用 `BB_API_BASE` 或 `--api-base` 指向 `http://127.0.0.1:8999`。
 
 ## Login And Agent Registration
 
-- 人类用户登录：`basebuilder login`
-- Agent 设备注册：`basebuilder agent register`
+- 人类用户登录并自动完成本机 Agent 注册：`basebuilder login`
+- Agent token 异常时重新注册：`basebuilder agent register`
 - 诊断当前是否可用：`basebuilder doctor --format json`
 - 查看当前用户：`basebuilder whoami --format json`
 - 查看 Agent 状态：`basebuilder agent status --format json`
 - 退出并吊销本地 token：`basebuilder logout`
 
-浏览器授权页成功后可能会自动关闭，但登录是否完成只以 CLI 收到并保存 access token 为准。
+浏览器授权页成功后可能会自动关闭，但登录是否完成只以 CLI 收到并保存 access token 为准。登录成功后 CLI 会用刚拿到的人类 CLI token 自动 upsert 本机 agent identity，不要再要求用户确认第二个 agent 注册页面。
 
 ## Doctor First
 
@@ -60,10 +62,12 @@ Agent 调用时优先使用结构化输入，不要把首页的一组字段拼�
   "mode": "text",
   "我想要构建": "客户成功续费跟进系统",
   "我是": "客户成功团队负责人",
-  "业务场景": "续费前 90 天识别风险并跟进",
-  "痛点": ["风险靠人工记忆", "跟进动作散落在聊天记录"],
+  "主要使用者": "客户成功经理、销售主管",
+  "业务背景": "续费前 90 天识别风险并跟进",
+  "核心痛点": ["风险靠人工记忆", "跟进动作散落在聊天记录"],
   "已有资料": "历史客户清单、续费记录、服务备注",
-  "希望输出": ["客户健康度视图", "高风险续费跟进表"]
+  "希望输出": ["客户健康度视图", "高风险续费跟进表"],
+  "背景知识": "企业客户续费通常需要提前识别使用率下降、关键人变更和商务风险。"
 }
 ```
 
@@ -71,7 +75,7 @@ Agent 调用时优先使用结构化输入，不要把首页的一组字段拼�
 basebuilder create --input input.json --format ndjson
 ```
 
-用户确认三要素前不要使用 `--auto-accept`，除非用户明确要求跳过 review。非交互自动化里，先展示拆解出的管理对象、流程和字段，拿到确认后再继续。
+AI 方案初稿就是三要素页面。用户确认前不要使用 `--auto-accept`，除非用户明确要求跳过 review。非交互自动化里，先展示拆解出的管理对象、管理流程、关键信息和背景知识，拿到确认后再继续。
 
 多输入模式：
 
@@ -97,6 +101,13 @@ basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-sk
 ```
 
 生成的 `base-skill` 是操作该具体 Base 的 per-Base Skill。读取或写入该 Base 记录前，先加载这个 Skill。
+
+生成完成后不要直接 copy 或安装 Skill。先让用户打开 Base URL 检查表、字段、视图是否认可；用户认可后再执行 Lark copy；copy 完成并合并 `copy-result.json` 后，再询问是否让自己的 agent 学习这个表怎么用。只有用户确认后，才生成 per-Base Skill 并提示安装：
+
+```bash
+basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
+basebuilder skill install --source ./base-skill --target codex
+```
 
 ## Lark Copy
 

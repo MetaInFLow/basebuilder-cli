@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import shutil
 import sys
 import webbrowser
 from pathlib import Path
@@ -39,6 +40,7 @@ COMMANDS = [
     "agent register",
     "agent status",
     "agent unregister",
+    "skill install",
     "ext describe",
     "ext call",
 ]
@@ -167,6 +169,14 @@ def build_parser() -> argparse.ArgumentParser:
     agent_unregister = agent_sub.add_parser("unregister")
     agent_unregister.set_defaults(func=cmd_agent_unregister, operation="agents.unregister")
 
+    skill_cmd = sub.add_parser("skill")
+    skill_sub = skill_cmd.add_subparsers(dest="skill_command", required=True)
+    skill_install = skill_sub.add_parser("install")
+    skill_install.add_argument("--target", choices=["codex", "agents"], default="codex")
+    skill_install.add_argument("--path", default="", help="Install destination. Defaults to the selected target skills directory.")
+    skill_install.add_argument("--source", default="", help="Source skill directory. Defaults to this repo's generic basebuilder-cli skill.")
+    skill_install.set_defaults(func=cmd_skill_install, operation="skill.install")
+
     ext = sub.add_parser("ext")
     ext_sub = ext.add_subparsers(dest="ext_command", required=True)
     describe = ext_sub.add_parser("describe")
@@ -217,13 +227,31 @@ def cmd_login(args: argparse.Namespace) -> int:
     print(f"打开浏览器完成登录: {session['verification_url']}")
     print(f"确认码: {session['user_code']}")
     token = poll_for_token(client, session["device_code"], int(session["expires_at"]), int(session.get("poll_interval") or 5))
-    save_config(CliConfig(api_base=cfg.api_base, token=str(token["access_token"])))
+    human_token = str(token["access_token"])
+    agent = register_agent_with_token(cfg.api_base, human_token, args.device_name or default_device_name())
+    agent_token = str(agent.get("access_token") or human_token)
+    save_config(CliConfig(api_base=cfg.api_base, token=agent_token))
     print("登录成功")
+    print("Agent 自动注册成功，无需第二次授权确认。")
+    if agent.get("agent_identity_id"):
+        print(f"agent_id: {agent.get('agent_identity_id')}")
     return 0
 
 
 def cmd_agent_register(args: argparse.Namespace) -> int:
     cfg = make_config(args)
+    if cfg.token:
+        data = register_agent_with_token(cfg.api_base, cfg.token, args.device_name or default_device_name())
+        if data.get("access_token"):
+            save_config(CliConfig(api_base=cfg.api_base, token=str(data["access_token"])))
+        data["mode"] = "authenticated"
+        if args.format == "json":
+            print(dumps(ok_envelope("agents.register", data)))
+        else:
+            print("Agent 已自动注册，无需再次打开浏览器确认。")
+            print(f"agent_id: {data.get('agent_identity_id') or ''}")
+        return 0
+
     client = BaseBuilderApiClient(cfg.api_base)
     fingerprint = build_fingerprint(state_dir())
     session = client.device_start(
@@ -336,14 +364,16 @@ def cmd_create(args: argparse.Namespace) -> int:
         pass
     elif args.format == "ndjson":
         print(dumps(ok_envelope("builds.analyze", result.elements.to_dict(), {"runId": run_id, "messageId": result.message_id, "taskId": result.task_id})))
-        print(dumps(ok_envelope("builds.create", {"status": result.status, "runId": run_id, "run": result.run}, {"runId": run_id, "messageId": result.message_id, "taskId": result.task_id})))
+        print(dumps(ok_envelope("builds.create", create_result_payload(result, run_id), {"runId": run_id, "messageId": result.message_id, "taskId": result.task_id})))
     elif args.format == "json":
-        print(dumps(ok_envelope("builds.create", {"status": result.status, "runId": run_id, "elements": result.elements.to_dict(), "run": result.run})))
+        print(dumps(ok_envelope("builds.create", create_result_payload(result, run_id))))
     else:
-        print("三要素:")
+        print("AI 方案初稿 / 三要素:")
         print("管理对象: " + result.elements.manage_what)
         print("流程: " + result.elements.workflow)
         print("字段: " + result.elements.fields)
+        if result.elements.background_knowledge:
+            print("背景知识: " + result.elements.background_knowledge)
         print("状态: " + result.status)
         print("run_id: " + run_id)
 
@@ -360,6 +390,8 @@ def cmd_create(args: argparse.Namespace) -> int:
             "latest_progress": latest_progress,
             "status": str(latest_progress.get("status") or latest_progress.get("state") or result.status),
         })
+        if args.format == "human" and result.status == "building":
+            print_post_build_guidance(run_id, latest_progress)
     return 0
 
 
@@ -442,6 +474,24 @@ def cmd_lark_copy(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_skill_install(args: argparse.Namespace) -> int:
+    source = Path(args.source).expanduser() if args.source else bundled_generic_skill_dir()
+    if not (source / "SKILL.md").exists():
+        raise ApiError("SKILL_SOURCE_INVALID", f"Skill source 缺少 SKILL.md: {source}", retryable=False)
+    skill_name = read_skill_name(source / "SKILL.md") or ("basebuilder-cli" if not args.source else source.name)
+    destination = Path(args.path).expanduser() if args.path else default_skill_install_dir(args.target, skill_name)
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+    print(dumps(ok_envelope("skill.install", {
+        "source": str(source),
+        "path": str(destination),
+        "target": args.target,
+        "nextSteps": [f"重启或刷新你的 agent，让它重新加载 {destination}。"],
+    })))
+    return 0
+
+
 def cmd_ext_describe(args: argparse.Namespace) -> int:
     print(dumps(ok_envelope("ext.describe", describe_payload())))
     return 0
@@ -489,6 +539,7 @@ def describe_payload() -> dict[str, Any]:
             "modes": ["text", "excel"],
             "structuredInput": ["json"],
             "templateFields": ["我想要构建", "我是", "业务场景", "痛点", "已有资料", "希望输出"],
+            "pageTemplateFields": ["我想要构建", "我是/我们是", "主要使用者", "业务背景", "核心痛点", "已有资料", "希望输出", "约束", "参考案例", "背景知识"],
             "files": ["csv", "xlsx", "txt", "md"],
             "excel": "mode=excel requires at least one csv/xlsx file; multiple spreadsheet files are allowed",
             "refineFiles": "three-elements optimize can include multiple supporting files",
@@ -511,6 +562,7 @@ def describe_payload() -> dict[str, Any]:
                 "client_kind": "agent",
                 "fingerprint": "hash-only local fingerprint; raw MAC/hostname/username are not sent",
                 "urls": ["verificationUrl", "loginUrl", "registerUrl", "rechargeUrl"],
+                "authenticated_auto_register": "after basebuilder login, CLI upserts an agent identity without a second browser confirmation",
             },
         },
         "doctor": {
@@ -519,6 +571,16 @@ def describe_payload() -> dict[str, Any]:
             "status": ["ready", "ready_with_warnings", "needs_login", "offline", "no_credits"],
         },
     }
+
+
+def register_agent_with_token(api_base: str, token: str, device_name: str) -> dict[str, Any]:
+    fingerprint = build_fingerprint(state_dir())
+    client = BaseBuilderApiClient(api_base, token)
+    return client.agent_upsert(
+        device_name=device_name,
+        fingerprint_hash=str(fingerprint["fingerprint_hash"]),
+        fingerprint_signals=dict(fingerprint["fingerprint_signals"]),
+    )
 
 
 def agent_registration_payload(session: dict[str, Any], fingerprint: dict[str, Any]) -> dict[str, Any]:
@@ -553,17 +615,25 @@ def read_prompt() -> str:
 def read_template_input() -> dict[str, Any]:
     want_to_build = read_line("我想要构建: ").strip()
     role = read_line("我是/我们是: ").strip()
-    scenario = read_line("业务场景/当前流程(可选): ").strip()
-    pain_points = parse_multi_value(read_line("痛点(多个用逗号分隔，可选): ").strip())
+    primary_users = read_line("主要使用者(可选): ").strip()
+    business_background = read_line("业务背景/当前流程(可选): ").strip()
+    pain_points = parse_multi_value(read_line("核心痛点(多个用逗号分隔，可选): ").strip())
     existing_materials = read_line("已有资料(可选): ").strip()
     desired_outputs = parse_multi_value(read_line("希望输出(多个用逗号分隔，可选): ").strip())
+    constraints = parse_multi_value(read_line("约束/不做(多个用逗号分隔，可选): ").strip())
+    examples = parse_multi_value(read_line("参考案例(多个用逗号分隔，可选): ").strip())
+    background = read_line("背景知识(可选): ").strip()
     return {
         "我想要构建": want_to_build,
         "我是": role,
-        "业务场景": scenario,
-        "痛点": pain_points,
+        "主要使用者": primary_users,
+        "业务背景": business_background,
+        "核心痛点": pain_points,
         "已有资料": existing_materials,
         "希望输出": desired_outputs,
+        "约束": constraints,
+        "参考案例": examples,
+        "背景知识": background,
     }
 
 
@@ -609,7 +679,8 @@ def edit_elements(elements: ThreeElements) -> ThreeElements:
     manage_what = read_line(f"管理对象 [{elements.manage_what}]: ").strip() or elements.manage_what
     workflow = read_line(f"流程 [{elements.workflow}]: ").strip() or elements.workflow
     fields = read_line(f"字段 [{elements.fields}]: ").strip() or elements.fields
-    return ThreeElements(manage_what=manage_what, workflow=workflow, fields=fields)
+    background = read_line(f"背景知识 [{elements.background_knowledge}]: ").strip() or elements.background_knowledge
+    return ThreeElements(manage_what=manage_what, workflow=workflow, fields=fields, background_knowledge=background)
 
 
 def emit_create_stage(fmt: str, operation: str, data: dict[str, Any], meta: dict[str, Any] | None = None) -> None:
@@ -618,10 +689,13 @@ def emit_create_stage(fmt: str, operation: str, data: dict[str, Any], meta: dict
         return
     stream = sys.stdout if fmt == "human" else sys.stderr
     if operation in {"builds.analyze", "builds.optimize", "builds.edit"}:
-        print("三要素:", file=stream)
+        print("AI 方案初稿 / 三要素:", file=stream)
         print("管理对象: " + str(data.get("manage_what") or ""), file=stream)
         print("流程: " + str(data.get("workflow") or ""), file=stream)
         print("字段: " + str(data.get("fields") or ""), file=stream)
+        background = str(data.get("backgroundKnowledge") or data.get("background_knowledge") or "")
+        if background:
+            print("背景知识: " + background, file=stream)
         return
     print("状态: " + str(data.get("status") or ""), file=stream)
     if data.get("runId"):
@@ -642,6 +716,67 @@ def parse_multi_value(text: str) -> list[str]:
 
 def default_device_name() -> str:
     return f"{platform.node() or 'local'} / {platform.system()}"
+
+
+def create_result_payload(result: CreateResult, run_id: str) -> dict[str, Any]:
+    needs_confirmation = result.status == "needs_confirmation"
+    payload: dict[str, Any] = {
+        "status": result.status,
+        "stage": "ai_blueprint_draft" if needs_confirmation else "building",
+        "runId": run_id,
+        "elements": result.elements.to_dict(),
+        "run": result.run,
+        "confirmationRequired": needs_confirmation,
+        "nextSteps": [],
+    }
+    if needs_confirmation:
+        payload["nextSteps"] = [
+            "确认方案后再开始生成：交互模式输入 accept，或明确使用 --auto-accept。",
+            "如需修改 AI 方案初稿，使用 edit 或 optimize；optimize 可继续附加多个文件。",
+        ]
+    else:
+        payload["nextSteps"] = [
+            f"运行 `basebuilder runs attach {run_id}` 查看生成进度。",
+        ]
+    return payload
+
+
+def print_post_build_guidance(run_id: str, progress: dict[str, Any]) -> None:
+    base_url = str(progress.get("baseUrl") or "")
+    status = str(progress.get("status") or progress.get("state") or "").lower()
+    if not base_url or status not in {"success", "succeeded", "completed", "complete"}:
+        return
+    print("")
+    print("下一步:")
+    print(f"- 请先检查生成的多维表: {base_url}")
+    print("- 如果认可该表，再把它转移到自己的 Feishu/Lark 空间：")
+    print(f"  basebuilder report generate {run_id} --out ./report.json")
+    print(f"  basebuilder lark copy {run_id} --report ./report.json --copy-result ./copy-result.json")
+    print("- 转移完成后，确认是否让自己的 agent 学习这个表怎么用；确认后生成 report 和该表专用 Skill：")
+    print(f"  basebuilder artifacts skill {run_id} --from-report ./report.json --out ./base-skill")
+    print("  basebuilder skill install --source ./base-skill --target codex")
+
+
+def bundled_generic_skill_dir() -> Path:
+    repo_skill = Path(__file__).resolve().parents[2] / "skills" / "basebuilder-cli"
+    if (repo_skill / "SKILL.md").exists():
+        return repo_skill
+    package_skill = Path(__file__).resolve().parent / "resources" / "basebuilder-cli"
+    return package_skill
+
+
+def default_skill_install_dir(target: str, skill_name: str = "basebuilder-cli") -> Path:
+    safe_name = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in skill_name).strip("-") or "basebuilder-cli"
+    if target == "agents":
+        return Path(f"~/.agents/skills/{safe_name}").expanduser()
+    return Path(f"~/.codex/skills/{safe_name}").expanduser()
+
+
+def read_skill_name(path: Path) -> str:
+    for line in path.read_text(errors="ignore").splitlines()[:20]:
+        if line.startswith("name: "):
+            return line.split(":", 1)[1].strip()
+    return ""
 
 
 def emit(fmt: str, operation: str, data: Any, *, human: str) -> int:

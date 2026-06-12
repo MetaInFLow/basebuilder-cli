@@ -72,6 +72,32 @@ class IntakeReportLarkTest(unittest.TestCase):
         self.assertNotIn("agent needs to use BaseBuilder CLI", description_line)
         self.assertNotIn("log in", description_line.lower())
 
+    def test_repo_install_docs_prompt_skill_install_and_cli_can_install_it(self):
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("basebuilder skill install --target codex", readme)
+        self.assertIn("basebuilder skill install --target agents", readme)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            target = Path(tmp) / "skills" / "basebuilder-cli"
+            with contextlib.redirect_stdout(out):
+                exit_code = cli.main(["skill", "install", "--path", str(target)])
+
+            installed = target / "SKILL.md"
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(installed.exists())
+            self.assertIn("BaseBuilder CLI", installed.read_text())
+            self.assertIn(str(target), out.getvalue())
+
+            generated = Path(tmp) / "generated-skill"
+            generated.mkdir()
+            (generated / "SKILL.md").write_text("---\nname: basebuilder-base-abc123\n---\n# Generated\n")
+            with mock.patch.dict(os.environ, {"HOME": tmp}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    generated_code = cli.main(["skill", "install", "--source", str(generated), "--target", "codex"])
+            self.assertEqual(generated_code, 0)
+            self.assertTrue((Path(tmp) / ".codex" / "skills" / "basebuilder-base-abc123" / "SKILL.md").exists())
+
     def test_create_input_json_uses_gui_template_fields_not_prompt_blocks(self):
         with tempfile.TemporaryDirectory() as tmp:
             input_path = Path(tmp) / "input.json"

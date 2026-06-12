@@ -11,13 +11,18 @@ class ThreeElements:
     manage_what: str
     workflow: str
     fields: str
+    background_knowledge: str = ""
 
     def to_dict(self) -> dict[str, str]:
-        return {
+        data = {
             "manage_what": self.manage_what,
             "workflow": self.workflow,
             "fields": self.fields,
         }
+        if self.background_knowledge:
+            data["backgroundKnowledge"] = self.background_knowledge
+            data["background_knowledge"] = self.background_knowledge
+        return data
 
 
 @dataclass
@@ -64,6 +69,11 @@ class CreateFlow:
                     manage_what=str(payload.get("manage_what") or elements.manage_what),
                     workflow=str(payload.get("workflow") or elements.workflow),
                     fields=str(payload.get("fields") or elements.fields),
+                    background_knowledge=str(
+                        payload.get("backgroundKnowledge")
+                        or payload.get("background_knowledge")
+                        or elements.background_knowledge
+                    ),
                 )
                 continue
             if action == "accept":
@@ -85,6 +95,12 @@ def normalize_elements(value: Any) -> ThreeElements:
             manage_what=str(data.get("manage_what") or ""),
             workflow=str(data.get("workflow") or ""),
             fields=str(data.get("fields") or ""),
+            background_knowledge=str(
+                data.get("backgroundKnowledge")
+                or data.get("background_knowledge")
+                or data.get("background")
+                or ""
+            ),
         )
     raise TypeError("three elements response must be a mapping")
 

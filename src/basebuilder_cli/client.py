@@ -63,6 +63,19 @@ class BaseBuilderApiClient:
     def agent_current(self) -> dict[str, Any]:
         return self._request("GET", "/api/cli/agents/current")
 
+    def agent_upsert(
+        self,
+        *,
+        device_name: str,
+        fingerprint_hash: str,
+        fingerprint_signals: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._request("POST", "/api/cli/agents/current", {
+            "device_name": device_name,
+            "fingerprint_hash": fingerprint_hash,
+            "fingerprint_signals": fingerprint_signals or {},
+        })
+
     def agent_unregister(self) -> dict[str, Any]:
         return self._request("DELETE", "/api/cli/agents/current")
 

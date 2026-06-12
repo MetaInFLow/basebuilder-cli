@@ -16,13 +16,14 @@ SUPPORTED_MODES = {"text", "excel"}
 TEMPLATE_FIELD_ALIASES = {
     "wantToBuild": ("wantToBuild", "want_to_build", "title", "我想要构建", "想要构建", "我要构建", "构建目标"),
     "role": ("role", "persona", "team", "我是", "我们是", "用户身份", "团队角色"),
-    "scenario": ("scenario", "business_scenario", "current_process", "currentWorkflow", "业务场景", "当前流程", "使用场景"),
-    "painPoints": ("painPoints", "pain_points", "pains", "pain", "痛点", "问题", "当前痛点"),
+    "primaryUsers": ("primaryUsers", "primary_users", "users", "主要使用者", "使用者", "目标用户"),
+    "businessBackground": ("businessBackground", "business_background", "scenario", "business_scenario", "current_process", "currentWorkflow", "业务背景", "业务场景", "当前流程", "使用场景"),
+    "painPoints": ("painPoints", "pain_points", "pains", "pain", "痛点", "核心痛点", "问题", "当前痛点"),
     "existingMaterials": ("existingMaterials", "existing_materials", "materials", "已有资料", "已有材料", "资料"),
     "desiredOutputs": ("desiredOutputs", "desired_outputs", "goals", "outputs", "希望输出", "目标", "期望产出"),
     "constraints": ("constraints", "limits", "约束", "限制", "不做"),
     "examples": ("examples", "samples", "参考案例", "例子"),
-    "background": ("background", "背景", "补充背景"),
+    "background": ("background", "背景", "补充背景", "背景知识"),
 }
 
 LIST_TEMPLATE_FIELDS = {"painPoints", "desiredOutputs", "constraints", "examples"}
