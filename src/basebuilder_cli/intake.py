@@ -28,6 +28,28 @@ TEMPLATE_FIELD_ALIASES = {
 
 LIST_TEMPLATE_FIELDS = {"painPoints", "desiredOutputs", "constraints", "examples"}
 
+REQUIRED_TEMPLATE_FIELDS = (
+    "wantToBuild",
+    "role",
+    "primaryUsers",
+    "businessBackground",
+    "painPoints",
+    "existingMaterials",
+    "desiredOutputs",
+    "background",
+)
+
+TEMPLATE_FIELD_LABELS = {
+    "wantToBuild": "我想要构建",
+    "role": "我是",
+    "primaryUsers": "主要使用者",
+    "businessBackground": "业务背景",
+    "painPoints": "核心痛点",
+    "existingMaterials": "已有资料",
+    "desiredOutputs": "希望输出",
+    "background": "背景知识",
+}
+
 
 def build_intake_prompt(
     *,
@@ -133,6 +155,23 @@ def normalize_template_input(data: dict[str, Any]) -> dict[str, Any]:
         if text:
             template[field] = text
     return template
+
+
+def missing_required_template_fields(template: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for field in REQUIRED_TEMPLATE_FIELDS:
+        value = template.get(field)
+        if field in LIST_TEMPLATE_FIELDS:
+            if not normalize_list(value):
+                missing.append(field)
+            continue
+        if not normalize_text(value):
+            missing.append(field)
+    return missing
+
+
+def missing_required_template_labels(template: dict[str, Any]) -> list[str]:
+    return [TEMPLATE_FIELD_LABELS.get(field, field) for field in missing_required_template_fields(template)]
 
 
 def first_present(data: dict[str, Any], aliases: tuple[str, ...]) -> Any:

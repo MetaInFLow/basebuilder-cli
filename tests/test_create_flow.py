@@ -66,6 +66,35 @@ class MessageIdFakeApi:
         return {"runId": "message_789", "messageId": message_id, "taskId": task_id}
 
 
+class EmptyOptimizeFakeApi(FakeApi):
+    def optimize(self, elements, instruction, message_id=None, task_id=None):
+        self.calls.append(("optimize", instruction, message_id, task_id))
+        return {
+            "messageId": message_id,
+            "taskId": task_id,
+            "elements": {
+                "manage_what": "",
+                "workflow": "",
+                "fields": "",
+                "background_knowledge": "",
+            },
+        }
+
+
+class IncompleteAnalyzeFakeApi(FakeApi):
+    def analyze(self, prompt):
+        self.calls.append(("analyze", prompt))
+        return {
+            "messageId": 654,
+            "taskId": "task_streaming",
+            "elements": {
+                "manage_what": "管理开发项目",
+                "workflow": "",
+                "fields": "",
+            },
+        }
+
+
 class CreateFlowTest(unittest.TestCase):
     def test_create_does_not_start_build_before_confirmation(self):
         api = FakeApi()
@@ -126,6 +155,31 @@ class CreateFlowTest(unittest.TestCase):
         encoded = json.dumps(refine_payload, ensure_ascii=False)
         self.assertIn("续费痛点", encoded)
         self.assertIn("风险等级", encoded)
+
+    def test_empty_optimize_response_preserves_previous_three_elements(self):
+        api = EmptyOptimizeFakeApi()
+        flow = CreateFlow(api)
+
+        result = flow.run(
+            prompt="做一个跨境电商进销存",
+            decisions=[{"action": "optimize", "instruction": "补全流程"}],
+        )
+
+        self.assertEqual(result.status, "needs_confirmation")
+        self.assertEqual(result.elements.manage_what, "管理跨境电商 SKU 与库存")
+        self.assertEqual(result.elements.workflow, "录入 SKU -> 同步库存 -> 预警补货")
+        self.assertEqual(result.elements.fields, "SKU编码、仓库、库存、补货阈值")
+
+    def test_incomplete_analyze_result_stays_streaming_and_never_starts_build(self):
+        api = IncompleteAnalyzeFakeApi()
+        flow = CreateFlow(api)
+
+        result = flow.run(prompt="做一个开发项目管理表", decisions=["accept"])
+
+        self.assertEqual(result.status, "analyzing")
+        self.assertEqual(result.message_id, 654)
+        self.assertEqual(result.task_id, "task_streaming")
+        self.assertEqual([call[0] for call in api.calls], ["analyze"])
 
     def test_create_reuses_analyze_message_id_for_build_start(self):
         api = MessageIdFakeApi()

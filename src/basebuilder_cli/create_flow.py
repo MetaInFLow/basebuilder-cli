@@ -24,6 +24,20 @@ class ThreeElements:
             data["background_knowledge"] = self.background_knowledge
         return data
 
+    def missing_required(self) -> list[str]:
+        missing: list[str] = []
+        for key, value in (
+            ("manage_what", self.manage_what),
+            ("workflow", self.workflow),
+            ("fields", self.fields),
+        ):
+            if not str(value or "").strip():
+                missing.append(key)
+        return missing
+
+    def is_complete(self) -> bool:
+        return self.missing_required() == []
+
 
 @dataclass
 class CreateResult:
@@ -44,6 +58,8 @@ class CreateFlow:
         message_id = extract_message_id(analyze_response)
         task_id = extract_task_id(analyze_response)
         run: dict[str, Any] = {}
+        if not elements.is_complete():
+            return CreateResult(status="analyzing", elements=elements, run=run, message_id=message_id, task_id=task_id)
 
         for decision in decisions:
             if isinstance(decision, str):
@@ -60,7 +76,7 @@ class CreateFlow:
                 files = [str(path) for path in payload.get("files") or []]
                 refine_instruction = build_refine_instruction(instruction=instruction, files=files)
                 optimize_response = self.api.optimize(elements, refine_instruction, message_id=message_id or None, task_id=task_id or None)
-                elements = normalize_elements(optimize_response)
+                elements = merge_elements(elements, normalize_elements(optimize_response))
                 message_id = extract_message_id(optimize_response) or message_id
                 task_id = extract_task_id(optimize_response) or task_id
                 continue
@@ -77,13 +93,16 @@ class CreateFlow:
                 )
                 continue
             if action == "accept":
+                if not elements.is_complete():
+                    return CreateResult(status="analyzing", elements=elements, run=run, message_id=message_id, task_id=task_id)
                 run = self.api.start_build(elements, message_id=message_id or None, task_id=task_id or None)
                 task_id = extract_task_id(run) or task_id
                 return CreateResult(status="building", elements=elements, run=run, message_id=message_id, task_id=task_id)
 
             raise ValueError(f"unknown create decision: {action}")
 
-        return CreateResult(status="needs_confirmation", elements=elements, run=run, message_id=message_id, task_id=task_id)
+        status = "needs_confirmation" if elements.is_complete() else "analyzing"
+        return CreateResult(status=status, elements=elements, run=run, message_id=message_id, task_id=task_id)
 
 
 def normalize_elements(value: Any) -> ThreeElements:
@@ -103,6 +122,15 @@ def normalize_elements(value: Any) -> ThreeElements:
             ),
         )
     raise TypeError("three elements response must be a mapping")
+
+
+def merge_elements(previous: ThreeElements, incoming: ThreeElements) -> ThreeElements:
+    return ThreeElements(
+        manage_what=incoming.manage_what or previous.manage_what,
+        workflow=incoming.workflow or previous.workflow,
+        fields=incoming.fields or previous.fields,
+        background_knowledge=incoming.background_knowledge or previous.background_knowledge,
+    )
 
 
 def extract_message_id(value: Any) -> int:

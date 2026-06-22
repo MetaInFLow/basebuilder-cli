@@ -13,10 +13,17 @@ from . import __version__
 from .artifacts import write_manual, write_skill
 from .client import ApiError, BaseBuilderApiClient, poll_for_token
 from .config import CliConfig, DEFAULT_API_BASE, clear_token, load_config, save_config, state_dir
-from .create_flow import CreateFlow, CreateResult, ThreeElements, extract_message_id, extract_task_id, normalize_elements
+from .create_flow import CreateFlow, CreateResult, ThreeElements, extract_message_id, extract_task_id, merge_elements, normalize_elements
 from .doctor import DoctorOptions, render_doctor_human, run_doctor
 from .fingerprint import build_fingerprint
-from .intake import build_intake_prompt, build_refine_instruction
+from .intake import (
+    LIST_TEMPLATE_FIELDS,
+    TEMPLATE_FIELD_LABELS,
+    build_intake_payload,
+    build_refine_instruction,
+    missing_required_template_fields,
+    missing_required_template_labels,
+)
 from .protocol import dumps, error_envelope, ok_envelope
 from .report import build_report, materialize_report_artifact, merge_copy_result, read_report, render_report_markdown, require_larkcli, write_report
 from .runs import list_runs, load_run, new_run_id, save_run
@@ -228,9 +235,17 @@ def cmd_login(args: argparse.Namespace) -> int:
     print(f"确认码: {session['user_code']}")
     token = poll_for_token(client, session["device_code"], int(session["expires_at"]), int(session.get("poll_interval") or 5))
     human_token = str(token["access_token"])
-    agent = register_agent_with_token(cfg.api_base, human_token, args.device_name or default_device_name())
-    agent_token = str(agent.get("access_token") or human_token)
-    save_config(CliConfig(api_base=cfg.api_base, token=agent_token))
+    try:
+        agent = register_agent_with_token(cfg.api_base, human_token, args.device_name or default_device_name())
+    except ApiError as exc:
+        if not is_agent_upsert_unavailable(exc):
+            raise
+        save_config(CliConfig(api_base=cfg.api_base, token=human_token))
+        print("登录成功")
+        print(f"Agent 自动注册暂不可用（{exc.code}: {exc}），已保留人类登录 token。")
+        print("请稍后运行 `basebuilder agent register` 完成 Agent 授权。")
+        return 0
+    save_config(CliConfig(api_base=cfg.api_base, token=str(agent.get("access_token") or human_token)))
     print("登录成功")
     print("Agent 自动注册成功，无需第二次授权确认。")
     if agent.get("agent_identity_id"):
@@ -240,34 +255,38 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 def cmd_agent_register(args: argparse.Namespace) -> int:
     cfg = make_config(args)
+    fallback_error: ApiError | None = None
     if cfg.token:
-        data = register_agent_with_token(cfg.api_base, cfg.token, args.device_name or default_device_name())
-        if data.get("access_token"):
-            save_config(CliConfig(api_base=cfg.api_base, token=str(data["access_token"])))
-        data["mode"] = "authenticated"
-        if args.format == "json":
-            print(dumps(ok_envelope("agents.register", data)))
+        try:
+            data = register_agent_with_token(cfg.api_base, cfg.token, args.device_name or default_device_name())
+        except ApiError as exc:
+            if not is_agent_upsert_unavailable(exc):
+                raise
+            fallback_error = exc
         else:
-            print("Agent 已自动注册，无需再次打开浏览器确认。")
-            print(f"agent_id: {data.get('agent_identity_id') or ''}")
-        return 0
+            if data.get("access_token"):
+                save_config(CliConfig(api_base=cfg.api_base, token=str(data["access_token"])))
+            data["mode"] = "authenticated"
+            if args.format == "json":
+                print(dumps(ok_envelope("agents.register", data)))
+            else:
+                print("Agent 已自动注册，无需再次打开浏览器确认。")
+                print(f"agent_id: {data.get('agent_identity_id') or ''}")
+            return 0
 
-    client = BaseBuilderApiClient(cfg.api_base)
-    fingerprint = build_fingerprint(state_dir())
-    session = client.device_start(
+    client, session, data = start_agent_registration_session(
+        cfg,
         args.device_name or default_device_name(),
-        intent="agent_register",
-        client_kind="agent",
-        fingerprint_hash=str(fingerprint["fingerprint_hash"]),
-        fingerprint_signals=dict(fingerprint["fingerprint_signals"]),
+        fallback_error=fallback_error,
     )
-    data = agent_registration_payload(session, fingerprint)
     verification_url = str(data.get("verificationUrl") or "")
 
     if args.format == "json":
         print(dumps(ok_envelope("agents.register", data)))
         return 0
 
+    if fallback_error:
+        print(f"已登录自动注册暂不可用（{fallback_error.code}: {fallback_error}），改用浏览器授权流程。")
     if verification_url and not args.no_open:
         webbrowser.open(verification_url)
     print(f"当前 API: {cfg.api_base}")
@@ -285,6 +304,31 @@ def cmd_agent_register(args: argparse.Namespace) -> int:
     save_config(CliConfig(api_base=cfg.api_base, token=str(token["access_token"])))
     print("Agent 注册并登录成功")
     return 0
+
+
+def start_agent_registration_session(
+    cfg: CliConfig,
+    device_name: str,
+    *,
+    fallback_error: ApiError | None = None,
+) -> tuple[BaseBuilderApiClient, dict[str, Any], dict[str, Any]]:
+    client = BaseBuilderApiClient(cfg.api_base)
+    fingerprint = build_fingerprint(state_dir())
+    session = client.device_start(
+        device_name,
+        intent="agent_register",
+        client_kind="agent",
+        fingerprint_hash=str(fingerprint["fingerprint_hash"]),
+        fingerprint_signals=dict(fingerprint["fingerprint_signals"]),
+    )
+    data = agent_registration_payload(session, fingerprint)
+    data["mode"] = "device_flow"
+    if fallback_error:
+        data["authenticatedFallback"] = {
+            "code": fallback_error.code,
+            "message": str(fallback_error),
+        }
+    return client, session, data
 
 
 def cmd_agent_status(args: argparse.Namespace) -> int:
@@ -328,13 +372,17 @@ def cmd_create(args: argparse.Namespace) -> int:
             structured_input = read_template_input()
         else:
             prompt_text = read_prompt()
-    prompt = build_intake_prompt(
+    intake_payload = build_intake_payload(
         prompt=prompt_text,
         mode=args.mode,
         input_path=args.input,
         files=args.file,
         structured_input=structured_input,
     )
+    require_complete_template = bool(args.input or structured_input)
+    if require_complete_template:
+        ensure_complete_intake_template(intake_payload["intakeTemplate"])
+    prompt = json.dumps(intake_payload, ensure_ascii=False, separators=(",", ":"))
     emitted_stdout = False
     if not args.auto_accept and sys.stdin.isatty():
         result, emitted_stdout = run_interactive_create(client, prompt, args.format)
@@ -351,7 +399,7 @@ def cmd_create(args: argparse.Namespace) -> int:
             "mode": args.mode,
             "input": args.input,
             "files": args.file,
-            "template": structured_input or {},
+            "template": intake_payload.get("intakeTemplate") or {},
         },
         "elements": result.elements.to_dict(),
         "api_run": result.run,
@@ -539,6 +587,7 @@ def describe_payload() -> dict[str, Any]:
             "modes": ["text", "excel"],
             "structuredInput": ["json"],
             "templateFields": ["我想要构建", "我是", "业务场景", "痛点", "已有资料", "希望输出"],
+            "requiredTemplateFields": ["我想要构建", "我是", "主要使用者", "业务背景", "核心痛点", "已有资料", "希望输出", "背景知识"],
             "pageTemplateFields": ["我想要构建", "我是/我们是", "主要使用者", "业务背景", "核心痛点", "已有资料", "希望输出", "约束", "参考案例", "背景知识"],
             "files": ["csv", "xlsx", "txt", "md"],
             "excel": "mode=excel requires at least one csv/xlsx file; multiple spreadsheet files are allowed",
@@ -583,6 +632,10 @@ def register_agent_with_token(api_base: str, token: str, device_name: str) -> di
     )
 
 
+def is_agent_upsert_unavailable(exc: ApiError) -> bool:
+    return exc.code.upper() in {"404", "405", "NOT_FOUND", "ROUTE_NOT_FOUND", "METHOD_NOT_ALLOWED"}
+
+
 def agent_registration_payload(session: dict[str, Any], fingerprint: dict[str, Any]) -> dict[str, Any]:
     verification_url = str(session.get("verificationUrl") or session.get("verification_url") or "")
     return {
@@ -615,14 +668,14 @@ def read_prompt() -> str:
 def read_template_input() -> dict[str, Any]:
     want_to_build = read_line("我想要构建: ").strip()
     role = read_line("我是/我们是: ").strip()
-    primary_users = read_line("主要使用者(可选): ").strip()
-    business_background = read_line("业务背景/当前流程(可选): ").strip()
-    pain_points = parse_multi_value(read_line("核心痛点(多个用逗号分隔，可选): ").strip())
-    existing_materials = read_line("已有资料(可选): ").strip()
-    desired_outputs = parse_multi_value(read_line("希望输出(多个用逗号分隔，可选): ").strip())
+    primary_users = read_line("主要使用者: ").strip()
+    business_background = read_line("业务背景/当前流程: ").strip()
+    pain_points = parse_multi_value(read_line("核心痛点(多个用逗号分隔): ").strip())
+    existing_materials = read_line("已有资料(没有则填“暂无”): ").strip()
+    desired_outputs = parse_multi_value(read_line("希望输出(多个用逗号分隔): ").strip())
     constraints = parse_multi_value(read_line("约束/不做(多个用逗号分隔，可选): ").strip())
     examples = parse_multi_value(read_line("参考案例(多个用逗号分隔，可选): ").strip())
-    background = read_line("背景知识(可选): ").strip()
+    background = read_line("背景知识(没有则填“暂无”): ").strip()
     return {
         "我想要构建": want_to_build,
         "我是": role,
@@ -637,12 +690,40 @@ def read_template_input() -> dict[str, Any]:
     }
 
 
+def ensure_complete_intake_template(template: dict[str, Any]) -> None:
+    missing = missing_required_template_fields(template)
+    if missing and sys.stdin.isatty():
+        prompt_for_missing_template_fields(template, missing)
+        missing = missing_required_template_fields(template)
+    if missing:
+        labels = "、".join(missing_required_template_labels(template))
+        raise ApiError(
+            "INTAKE_TEMPLATE_INCOMPLETE",
+            f"首页字段不完整，请先补足：{labels}。如果确实没有内容，请填写“暂无”。",
+            retryable=False,
+        )
+
+
+def prompt_for_missing_template_fields(template: dict[str, Any], missing: list[str]) -> None:
+    print("首页字段不完整，请补足缺失项。没有内容时填写“暂无”。", file=sys.stderr)
+    for field in missing:
+        label = TEMPLATE_FIELD_LABELS.get(field, field)
+        raw = read_line(f"{label}: ").strip()
+        if field in LIST_TEMPLATE_FIELDS:
+            template[field] = parse_multi_value(raw)
+        else:
+            template[field] = raw
+
+
 def run_interactive_create(client: BaseBuilderApiClient, prompt: str, fmt: str) -> tuple[CreateResult, bool]:
     analyze_response = client.analyze(prompt)
     elements = normalize_elements(analyze_response)
     message_id = extract_message_id(analyze_response)
     task_id = extract_task_id(analyze_response)
     emit_create_stage(fmt, "builds.analyze", elements.to_dict(), {"messageId": message_id, "taskId": task_id})
+    if not elements.is_complete():
+        print("三要素仍在流式生成或尚未完整返回，暂不能确认生成。请等待完整三要素后再继续。", file=sys.stderr)
+        return CreateResult(status="analyzing", elements=elements, run={}, message_id=message_id, task_id=task_id), fmt in {"human", "ndjson"}
 
     while True:
         action = read_line("操作 [a]ccept / [e]dit / [o]ptimize / [q]uit: ").strip().lower()
@@ -665,7 +746,7 @@ def run_interactive_create(client: BaseBuilderApiClient, prompt: str, fmt: str) 
             file_text = read_line("可选补充文件路径(多个用逗号分隔，回车跳过): ").strip()
             refine_instruction = build_refine_instruction(instruction=instruction, files=parse_multi_value(file_text))
             optimize_response = client.optimize(elements, refine_instruction, message_id=message_id or None, task_id=task_id or None)
-            elements = normalize_elements(optimize_response)
+            elements = merge_elements(elements, normalize_elements(optimize_response))
             message_id = extract_message_id(optimize_response) or message_id
             task_id = extract_task_id(optimize_response) or task_id
             emit_create_stage(fmt, "builds.optimize", elements.to_dict(), {"messageId": message_id, "taskId": task_id})
@@ -720,16 +801,23 @@ def default_device_name() -> str:
 
 def create_result_payload(result: CreateResult, run_id: str) -> dict[str, Any]:
     needs_confirmation = result.status == "needs_confirmation"
+    analyzing = result.status == "analyzing"
     payload: dict[str, Any] = {
         "status": result.status,
-        "stage": "ai_blueprint_draft" if needs_confirmation else "building",
+        "stage": "ai_blueprint_streaming" if analyzing else ("ai_blueprint_draft" if needs_confirmation else "building"),
         "runId": run_id,
         "elements": result.elements.to_dict(),
         "run": result.run,
-        "confirmationRequired": needs_confirmation,
+        "confirmationRequired": needs_confirmation or analyzing,
         "nextSteps": [],
     }
-    if needs_confirmation:
+    if analyzing:
+        payload["missingElements"] = result.elements.missing_required()
+        payload["nextSteps"] = [
+            "三要素仍在流式生成或尚未完整返回，不要手动补填后直接确认生成。",
+            "等待完整的管理对象、流程和字段返回后再确认；如长时间没有完成，请重新运行 create 或检查 API 流式返回。",
+        ]
+    elif needs_confirmation:
         payload["nextSteps"] = [
             "确认方案后再开始生成：交互模式输入 accept，或明确使用 --auto-accept。",
             "如需修改 AI 方案初稿，使用 edit 或 optimize；optimize 可继续附加多个文件。",

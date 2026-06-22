@@ -55,7 +55,9 @@ basebuilder doctor --format json
 
 ## Create A Base
 
-Agent 调用时优先使用结构化输入，不要把首页的一组字段拼成一句大 prompt。结构化 `input.json` 应贴近 GUI 首屏模版：
+Agent 调用时必须先从用户原话、附件和上下文中抽取 GUI 首页字段，不要把首页的一组字段拼成一句大 prompt。必填首页字段是：`我想要构建`、`我是`、`主要使用者`、`业务背景`、`核心痛点`、`已有资料`、`希望输出`、`背景知识`。如果某一项无法从用户输入中确定，先向用户补问；如果用户确认没有内容，写 `暂无`，不要替用户编造。
+
+结构化 `input.json` 应贴近 GUI 首屏模版：
 
 ```json
 {
@@ -75,7 +77,9 @@ Agent 调用时优先使用结构化输入，不要把首页的一组字段拼�
 basebuilder create --input input.json --format ndjson
 ```
 
-AI 方案初稿就是三要素页面。用户确认前不要使用 `--auto-accept`，除非用户明确要求跳过 review。非交互自动化里，先展示拆解出的管理对象、管理流程、关键信息和背景知识，拿到确认后再继续。
+AI 方案初稿就是三要素页面。三要素是流式生成结果，只有 `管理对象 / manage_what`、`流程 / workflow`、`字段 / fields` 都非空时才算完整。若 CLI 返回 `stage=ai_blueprint_streaming`、`status=analyzing`、或三要素任一项为空，等待完整结果或重新运行 create；不要手动填三要素后直接确认生成。
+
+用户确认前不要使用 `--auto-accept`，除非用户明确要求跳过 review。非交互自动化里，先展示拆解出的管理对象、管理流程、关键信息和背景知识，拿到确认后再继续。
 
 多输入模式：
 

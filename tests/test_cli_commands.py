@@ -89,6 +89,38 @@ class FakeInteractiveClient:
         return iter([])
 
 
+class FakeIncompleteAnalyzeClient:
+    started = False
+
+    def __init__(self, api_base, token=""):
+        self.api_base = api_base
+        self.token = token
+
+    def analyze(self, prompt):
+        return {
+            "messageId": 333,
+            "taskId": "task_streaming_333",
+            "elements": {
+                "manage_what": "管理开发项目",
+                "workflow": "",
+                "fields": "",
+            },
+        }
+
+    def start_build(self, elements, message_id=None, task_id=None):
+        FakeIncompleteAnalyzeClient.started = True
+        raise AssertionError("incomplete three elements must not start a build")
+
+
+class FakeNeverAnalyzeClient:
+    def __init__(self, api_base, token=""):
+        self.api_base = api_base
+        self.token = token
+
+    def analyze(self, prompt):
+        raise AssertionError("incomplete intake must not call analyze")
+
+
 class FakeInspectClient:
     def __init__(self, api_base, token=""):
         self.api_base = api_base
@@ -213,6 +245,22 @@ class FakeAuthenticatedAgentClient(FakeLoginAutoAgentClient):
         raise AssertionError("authenticated agent register must not start a device approval session")
 
 
+class FakeAuthenticatedAgentUpsertUnavailableClient(FakeAgentClient):
+    init_tokens = []
+
+    def __init__(self, api_base, token=""):
+        super().__init__(api_base, token)
+        FakeAuthenticatedAgentUpsertUnavailableClient.init_tokens.append(token)
+
+    def agent_upsert(self, device_name, fingerprint_hash, fingerprint_signals):
+        raise ApiError("404", "not found", retryable=False)
+
+
+class FakeLoginAgentUpsertUnavailableClient(FakeLoginAutoAgentClient):
+    def agent_upsert(self, device_name, fingerprint_hash, fingerprint_signals):
+        raise ApiError("404", "not found", retryable=False)
+
+
 class FakeAuthErrorClient:
     def __init__(self, api_base, token=""):
         self.api_base = api_base
@@ -323,14 +371,14 @@ class CliCommandTest(unittest.TestCase):
             inputs = iter([
                 "客户线索 CRM",
                 "销售运营",
-                "",
-                "",
+                "销售、运营主管",
+                "线索从渠道进入后需要统一分配和跟进",
                 "线索分散",
-                "",
+                "暂无",
                 "线索表",
                 "",
                 "",
-                "",
+                "销售线索需要按阶段和责任人推进",
                 "o",
                 "加成交复盘",
                 "",
@@ -404,6 +452,8 @@ class CliCommandTest(unittest.TestCase):
                 "主要使用者": "采购、仓库、运营",
                 "业务背景": "多仓库存和补货节奏需要统一管理",
                 "核心痛点": ["库存分散", "低库存预警不及时"],
+                "已有资料": "历史库存台账",
+                "希望输出": ["库存总览", "低库存预警视图"],
                 "背景知识": "海外仓补货周期长，需要提前预警。",
             }, ensure_ascii=False))
             with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
@@ -419,6 +469,63 @@ class CliCommandTest(unittest.TestCase):
         self.assertIn("backgroundKnowledge", payload["data"]["elements"])
         self.assertIn("确认方案", "\n".join(payload["data"]["nextSteps"]))
         self.assertEqual(payload["data"]["run"], {})
+
+    def test_create_input_json_requires_homepage_template_fields_before_analyze(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            input_path = Path(tmp) / "input.json"
+            input_path.write_text(json.dumps({
+                "mode": "text",
+                "我想要构建": "开发项目管理表",
+                "我是": "研发负责人",
+            }, ensure_ascii=False))
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeNeverAnalyzeClient):
+                    with mock.patch("sys.stdin.isatty", return_value=False):
+                        with contextlib.redirect_stdout(out):
+                            exit_code = cli.main(["create", "--input", str(input_path), "--format", "json"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["error"]["code"], "INTAKE_TEMPLATE_INCOMPLETE")
+        self.assertIn("主要使用者", payload["error"]["message"])
+        self.assertIn("希望输出", payload["error"]["message"])
+
+    def test_create_auto_accept_with_streaming_three_elements_does_not_start_build(self):
+        FakeIncompleteAnalyzeClient.started = False
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            input_path = Path(tmp) / "input.json"
+            input_path.write_text(json.dumps({
+                "mode": "text",
+                "我想要构建": "开发项目管理表",
+                "我是": "研发负责人",
+                "主要使用者": "产品、研发、测试",
+                "业务背景": "需求、排期、缺陷和上线复盘分散在多个工具",
+                "核心痛点": ["项目进度不透明", "风险和阻塞同步不及时"],
+                "已有资料": "暂无",
+                "希望输出": ["项目总览", "迭代看板", "风险阻塞清单"],
+                "背景知识": "研发项目通常按需求、任务、缺陷、迭代和上线里程碑协同。",
+            }, ensure_ascii=False))
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeIncompleteAnalyzeClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main([
+                            "create",
+                            "--input",
+                            str(input_path),
+                            "--format",
+                            "json",
+                            "--auto-accept",
+                        ])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(FakeIncompleteAnalyzeClient.started)
+        self.assertEqual(payload["data"]["status"], "analyzing")
+        self.assertEqual(payload["data"]["stage"], "ai_blueprint_streaming")
+        self.assertTrue(payload["data"]["confirmationRequired"])
+        self.assertIn("三要素", "\n".join(payload["data"]["nextSteps"]))
 
     def test_runs_inspect_fetches_api_snapshot_when_token_available(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -519,6 +626,22 @@ class CliCommandTest(unittest.TestCase):
         self.assertIn("Agent 自动注册成功", out.getvalue())
         self.assertNotIn("再次打开", out.getvalue())
 
+    def test_login_keeps_human_token_when_authenticated_agent_upsert_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeLoginAgentUpsertUnavailableClient):
+                    with mock.patch.object(cli.webbrowser, "open") as opened:
+                        with contextlib.redirect_stdout(out):
+                            exit_code = cli.main(["login", "--no-open"])
+                saved = cli.load_config()
+
+        self.assertEqual(exit_code, 0)
+        opened.assert_not_called()
+        self.assertEqual(saved.token, "human_token")
+        self.assertIn("Agent 自动注册暂不可用", out.getvalue())
+        self.assertIn("basebuilder agent register", out.getvalue())
+
     def test_agent_register_uses_authenticated_upsert_when_logged_in(self):
         FakeLoginAutoAgentClient.last_agent_payload = None
         with tempfile.TemporaryDirectory() as tmp:
@@ -539,6 +662,31 @@ class CliCommandTest(unittest.TestCase):
         self.assertEqual(payload["data"]["mode"], "authenticated")
         self.assertEqual(payload["data"]["client_kind"], "agent")
         self.assertEqual(FakeLoginAutoAgentClient.last_agent_payload["token"], "human_token")
+
+    def test_agent_register_falls_back_to_device_flow_when_authenticated_upsert_is_unavailable(self):
+        FakeAgentClient.last_payload = None
+        FakeAuthenticatedAgentUpsertUnavailableClient.init_tokens = []
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_config(cli.CliConfig(api_base="https://www.basebuilder.cn", token="human_token"))
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeAuthenticatedAgentUpsertUnavailableClient):
+                    with mock.patch.object(cli.webbrowser, "open") as opened:
+                        with contextlib.redirect_stdout(out):
+                            exit_code = cli.main(["agent", "register", "--no-open", "--format", "json"])
+                saved = cli.load_config()
+
+        self.assertEqual(exit_code, 0)
+        opened.assert_not_called()
+        self.assertEqual(saved.token, "human_token")
+        self.assertEqual(FakeAuthenticatedAgentUpsertUnavailableClient.init_tokens[0], "human_token")
+        self.assertEqual(FakeAuthenticatedAgentUpsertUnavailableClient.init_tokens[-1], "")
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["operation"], "agents.register")
+        self.assertEqual(payload["data"]["mode"], "device_flow")
+        self.assertEqual(payload["data"]["authenticatedFallback"]["code"], "404")
+        self.assertEqual(payload["data"]["verificationUrl"], "https://www.basebuilder.cn/cli/approve?user_code=ABCD-EFGH")
+        self.assertEqual((FakeAgentClient.last_payload or {})["intent"], "agent_register")
 
     def test_revoked_token_request_returns_structured_error_envelope(self):
         with tempfile.TemporaryDirectory() as tmp:
