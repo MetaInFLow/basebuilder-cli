@@ -135,6 +135,8 @@ basebuilder artifacts manual <run_id> --from-report ./report.json --out ./manual
 basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
 ```
 
+`create` 在任务启动成功后立即返回，默认不持续轮询服务器。查看一次状态使用 `runs inspect`；明确需要等待完成时使用 `runs attach`，或在创建时显式添加 `--wait`。相同结构化需求已有进行中的 run 时，CLI 会复用该 run 并阻止再次创建。
+
 `report.json` 是 manual 和 per-Base Skill 的机器真相源。它来自 API 返回的 sanitized final artifact，不包含 token、cookie、raw prompt 或内部 Builder 诊断。
 
 ### 复制到自己的 Lark 空间

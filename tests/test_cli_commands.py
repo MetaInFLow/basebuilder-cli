@@ -264,7 +264,7 @@ class CliCommandTest(unittest.TestCase):
         self.assertIn("agent register", payload["commands"])
         self.assertEqual(payload["api"]["agent_registration"]["production_base_url"], "https://www.basebuilder.cn")
 
-    def test_create_ndjson_streams_progress_without_natural_language(self):
+    def test_create_ndjson_returns_after_start_without_polling(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
             with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
@@ -285,13 +285,12 @@ class CliCommandTest(unittest.TestCase):
         self.assertEqual([payload["operation"] for payload in payloads], [
             "builds.analyze",
             "builds.create",
-            "runs.attach.progress",
-            "runs.attach.progress",
         ])
         self.assertTrue(all(payload["ok"] is True for payload in payloads))
-        self.assertEqual(payloads[-1]["data"]["progress"], 100)
+        self.assertEqual(payloads[-1]["data"]["status"], "building")
+        self.assertIn("runs inspect message_123", "\n".join(payloads[-1]["data"]["nextSteps"]))
 
-    def test_create_human_mode_prints_three_elements_and_progress(self):
+    def test_create_wait_streams_progress_only_when_explicitly_requested(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
             with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
@@ -302,6 +301,7 @@ class CliCommandTest(unittest.TestCase):
                             "--prompt",
                             "做一个跨境电商进销存",
                             "--auto-accept",
+                            "--wait",
                         ])
 
         text = out.getvalue()
@@ -315,6 +315,48 @@ class CliCommandTest(unittest.TestCase):
         self.assertIn("basebuilder lark copy message_123", text)
         self.assertIn("确认是否让自己的 agent 学习这个表", text)
         self.assertIn("basebuilder artifacts skill message_123", text)
+
+    def test_create_reuses_matching_active_local_run_without_second_api_request(self):
+        class FailOnDuplicateCreateClient:
+            def __init__(self, api_base, token=""):
+                pass
+
+            def analyze(self, prompt):
+                raise AssertionError("matching active run must prevent a second analyze request")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            prompt = cli.build_intake_prompt(
+                prompt="做一个跨境电商进销存",
+                mode="text",
+                input_path="",
+                files=[],
+            )
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_run("message_123", {
+                    "run_id": "message_123",
+                    "prompt": prompt,
+                    "status": "building",
+                    "message_id": 123,
+                    "task_id": "task_sample",
+                })
+                with mock.patch.object(cli, "BaseBuilderApiClient", FailOnDuplicateCreateClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main([
+                            "create",
+                            "--prompt",
+                            "做一个跨境电商进销存",
+                            "--format",
+                            "json",
+                            "--auto-accept",
+                        ])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["operation"], "builds.create")
+        self.assertEqual(payload["data"]["runId"], "message_123")
+        self.assertTrue(payload["data"]["duplicatePrevented"])
+        self.assertTrue(payload["data"]["reused"])
 
     def test_interactive_ndjson_create_supports_optimize_edit_accept_without_stdout_prompts(self):
         with tempfile.TemporaryDirectory() as tmp:

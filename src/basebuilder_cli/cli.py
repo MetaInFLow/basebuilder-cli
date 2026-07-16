@@ -105,6 +105,11 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--file", action="append", default=[])
     create.add_argument("--format", choices=["human", "json", "ndjson"], default="human")
     create.add_argument("--auto-accept", action="store_true")
+    create.add_argument(
+        "--wait",
+        action="store_true",
+        help="Keep polling until the build finishes. By default create returns after the task starts.",
+    )
     create.set_defaults(func=cmd_create, operation="builds.create")
 
     runs = sub.add_parser("runs")
@@ -320,7 +325,6 @@ def cmd_whoami(args: argparse.Namespace) -> int:
 
 def cmd_create(args: argparse.Namespace) -> int:
     cfg = make_config(args)
-    client = BaseBuilderApiClient(cfg.api_base, cfg.token)
     prompt_text = args.prompt
     structured_input: dict[str, Any] | None = None
     if not prompt_text and not args.input and not args.file:
@@ -335,6 +339,11 @@ def cmd_create(args: argparse.Namespace) -> int:
         files=args.file,
         structured_input=structured_input,
     )
+    active_run = find_matching_active_run(prompt)
+    if active_run:
+        return emit_reused_active_run(args.format, active_run)
+
+    client = BaseBuilderApiClient(cfg.api_base, cfg.token)
     emitted_stdout = False
     if not args.auto_accept and sys.stdin.isatty():
         result, emitted_stdout = run_interactive_create(client, prompt, args.format)
@@ -377,7 +386,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         print("状态: " + result.status)
         print("run_id: " + run_id)
 
-    if result.status == "building" and args.format in {"human", "ndjson"}:
+    if result.status == "building" and args.wait and args.format in {"human", "ndjson"}:
         for event in client.attach_progress(run_id):
             latest_progress = compact_progress_data(event.data)
             if args.format == "ndjson":
@@ -392,6 +401,10 @@ def cmd_create(args: argparse.Namespace) -> int:
         })
         if args.format == "human" and result.status == "building":
             print_post_build_guidance(run_id, latest_progress)
+    elif result.status == "building" and args.format == "human":
+        print("任务已在后台运行，CLI 不会持续轮询。")
+        print(f"查看一次状态: basebuilder runs inspect {run_id} --format json")
+        print(f"需要持续等待时: basebuilder runs attach {run_id} --format ndjson")
     return 0
 
 
@@ -736,9 +749,64 @@ def create_result_payload(result: CreateResult, run_id: str) -> dict[str, Any]:
         ]
     else:
         payload["nextSteps"] = [
-            f"运行 `basebuilder runs attach {run_id}` 查看生成进度。",
+            f"运行 `basebuilder runs inspect {run_id} --format json` 查看一次当前状态。",
+            f"只有需要持续等待时才运行 `basebuilder runs attach {run_id} --format ndjson`。",
         ]
     return payload
+
+
+def find_matching_active_run(prompt: str) -> dict[str, Any] | None:
+    active_statuses = {
+        "building",
+        "analyzing",
+        "running",
+        "started",
+        "queued",
+        "pending",
+        "processing",
+        "in_progress",
+        "retrying",
+    }
+    for row in list_runs():
+        if str(row.get("prompt") or "") != prompt:
+            continue
+        status = str(
+            row.get("status")
+            or first_mapping(row.get("snapshot")).get("status")
+            or first_mapping(row.get("latest_progress")).get("status")
+            or ""
+        ).strip().lower()
+        if status in active_statuses:
+            return row
+    return None
+
+
+def emit_reused_active_run(fmt: str, row: dict[str, Any]) -> int:
+    run_id = str(row.get("run_id") or "")
+    data = {
+        "status": str(row.get("status") or "building"),
+        "stage": "building",
+        "runId": run_id,
+        "messageId": int(row.get("message_id") or 0),
+        "taskId": str(row.get("task_id") or ""),
+        "reused": True,
+        "duplicatePrevented": True,
+        "nextSteps": [
+            f"运行 `basebuilder runs inspect {run_id} --format json` 查看一次当前状态。",
+            f"只有需要持续等待时才运行 `basebuilder runs attach {run_id} --format ndjson`。",
+        ],
+    }
+    if fmt in {"json", "ndjson"}:
+        print(dumps(ok_envelope("builds.create", data, {
+            "runId": run_id,
+            "messageId": data["messageId"],
+            "taskId": data["taskId"],
+        })))
+    else:
+        print("检测到相同需求已有进行中的任务，已阻止重复创建和重复扣费。")
+        print("run_id: " + run_id)
+        print(f"查看一次状态: basebuilder runs inspect {run_id} --format json")
+    return 0
 
 
 def print_post_build_guidance(run_id: str, progress: dict[str, Any]) -> None:

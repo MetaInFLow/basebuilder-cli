@@ -23,4 +23,6 @@ Use structured intake matching the Web first page. Keep fields separate: `我想
 
 The AI方案初稿/三要素 result must be shown to the user and explicitly confirmed before generation. Do not use `--auto-accept` unless the user explicitly requested trusted automation.
 
+`create` returns as soon as the task starts and does not poll continuously by default. Keep the returned `runId`; use `runs inspect` for a single status check, and use `runs attach` or `create --wait` only when the user explicitly wants to wait. If an identical intake already has an active local run, reuse that run and never call `create` again.
+
 After generation, ask the user to inspect the Base URL. Only after they approve, run Lark copy and merge `copy-result.json` into the report. Then ask whether the agent should learn the table; if yes, generate and install the per-Base Skill.

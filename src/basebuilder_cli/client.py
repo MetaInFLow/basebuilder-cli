@@ -112,7 +112,7 @@ class BaseBuilderApiClient:
         self,
         run_id: str,
         *,
-        poll_interval: float = 5.0,
+        poll_interval: float = 15.0,
         max_polls: int | None = None,
     ) -> Iterable[StreamEvent]:
         polls = 0

@@ -75,6 +75,8 @@ Agent 调用时优先使用结构化输入，不要把首页的一组字段拼�
 basebuilder create --input input.json --format ndjson
 ```
 
+`create` 启动任务后会立即返回，不会持续查询服务器。保存返回的 `runId`，先用 `basebuilder runs inspect <run_id> --format json` 查看一次状态；只有用户明确要求等待完成时，才使用 `basebuilder runs attach <run_id> --format ndjson` 或 `create --wait`。发现相同需求已有进行中的 run 时，沿用该 run，严禁再次执行 `create`。
+
 AI 方案初稿就是三要素页面。用户确认前不要使用 `--auto-accept`，除非用户明确要求跳过 review。非交互自动化里，先展示拆解出的管理对象、管理流程、关键信息和背景知识，拿到确认后再继续。
 
 多输入模式：
@@ -125,4 +127,4 @@ basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-sk
 - 不要提交 `~/.basebuilder`、access token、cookie、浏览器 session、生成的客户数据或临时 smoke 产物。
 - 只读查询可以通过生成的 per-Base Skill 直接执行。
 - 新增、更新、删除或批量修改记录前，必须复述目标表、字段和值，并等待用户明确确认。
-- run 中断时先用 `runs inspect` 或 `runs attach` 恢复；不要在未确认的情况下重复发起构建。
+- run 中断或仍在运行时先用 `runs inspect`，明确需要持续等待时再用 `runs attach`；不要重复发起构建。
