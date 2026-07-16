@@ -318,8 +318,19 @@ class CliCommandTest(unittest.TestCase):
 
     def test_create_reuses_matching_active_local_run_without_second_api_request(self):
         class FailOnDuplicateCreateClient:
+            snapshot_calls = 0
+
             def __init__(self, api_base, token=""):
                 pass
+
+            def run_snapshot(self, run_id):
+                self.__class__.snapshot_calls += 1
+                return {
+                    "runId": run_id,
+                    "status": "running",
+                    "statusSource": "builder_request",
+                    "terminal": False,
+                }
 
             def analyze(self, prompt):
                 raise AssertionError("matching active run must prevent a second analyze request")
@@ -357,6 +368,155 @@ class CliCommandTest(unittest.TestCase):
         self.assertEqual(payload["data"]["runId"], "message_123")
         self.assertTrue(payload["data"]["duplicatePrevented"])
         self.assertTrue(payload["data"]["reused"])
+        self.assertEqual(FailOnDuplicateCreateClient.snapshot_calls, 1)
+
+    def test_create_does_not_reuse_stale_local_building_after_server_failure(self):
+        class FailedRunThenCreateClient(FakeCreateClient):
+            analyze_calls = 0
+
+            def run_snapshot(self, run_id):
+                return {
+                    "runId": run_id,
+                    "status": "failed",
+                    "statusSource": "builder_request",
+                    "terminal": True,
+                }
+
+            def analyze(self, prompt):
+                self.__class__.analyze_calls += 1
+                return super().analyze(prompt)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            prompt = cli.build_intake_prompt(
+                prompt="做一个跨境电商进销存",
+                mode="text",
+                input_path="",
+                files=[],
+            )
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_run("message_old", {
+                    "run_id": "message_old",
+                    "prompt": prompt,
+                    "status": "building",
+                    "message_id": 122,
+                    "task_id": "task_old",
+                })
+                with mock.patch.object(cli, "BaseBuilderApiClient", FailedRunThenCreateClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main([
+                            "create",
+                            "--prompt",
+                            "做一个跨境电商进销存",
+                            "--format",
+                            "json",
+                            "--auto-accept",
+                        ])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["data"]["runId"], "message_123")
+        self.assertFalse(payload["data"].get("reused", False))
+        self.assertEqual(FailedRunThenCreateClient.analyze_calls, 1)
+
+    def test_create_reuses_server_running_run_even_when_local_status_is_stale_terminal(self):
+        class RunningRunClient:
+            snapshot_calls = 0
+
+            def __init__(self, api_base, token=""):
+                pass
+
+            def run_snapshot(self, run_id):
+                self.__class__.snapshot_calls += 1
+                return {
+                    "runId": run_id,
+                    "status": "running",
+                    "statusSource": "builder_request",
+                    "terminal": False,
+                }
+
+            def analyze(self, prompt):
+                raise AssertionError("server-running run must prevent a second analyze request")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            prompt = cli.build_intake_prompt(
+                prompt="做一个跨境电商进销存",
+                mode="text",
+                input_path="",
+                files=[],
+            )
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_run("message_123", {
+                    "run_id": "message_123",
+                    "prompt": prompt,
+                    "status": "completed",
+                    "message_id": 123,
+                    "task_id": "task_sample",
+                })
+                with mock.patch.object(cli, "BaseBuilderApiClient", RunningRunClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main([
+                            "create",
+                            "--prompt",
+                            "做一个跨境电商进销存",
+                            "--format",
+                            "json",
+                            "--auto-accept",
+                        ])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["data"]["runId"], "message_123")
+        self.assertTrue(payload["data"]["reused"])
+        self.assertEqual(RunningRunClient.snapshot_calls, 1)
+
+    def test_create_fails_closed_when_previous_run_status_is_unreachable(self):
+        class UnreachableStatusClient:
+            analyze_calls = 0
+
+            def __init__(self, api_base, token=""):
+                pass
+
+            def run_snapshot(self, run_id):
+                raise ApiError("NETWORK_ERROR", "network down", retryable=True)
+
+            def analyze(self, prompt):
+                self.__class__.analyze_calls += 1
+                raise AssertionError("must not create while previous run state is unknown")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            prompt = cli.build_intake_prompt(
+                prompt="做一个跨境电商进销存",
+                mode="text",
+                input_path="",
+                files=[],
+            )
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_run("message_123", {
+                    "run_id": "message_123",
+                    "prompt": prompt,
+                    "status": "building",
+                    "message_id": 123,
+                    "task_id": "task_sample",
+                })
+                with mock.patch.object(cli, "BaseBuilderApiClient", UnreachableStatusClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main([
+                            "create",
+                            "--prompt",
+                            "做一个跨境电商进销存",
+                            "--format",
+                            "json",
+                            "--auto-accept",
+                        ])
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["error"]["code"], "RUN_STATUS_UNAVAILABLE")
+        self.assertTrue(payload["error"]["retryable"])
+        self.assertEqual(UnreachableStatusClient.analyze_calls, 0)
 
     def test_interactive_ndjson_create_supports_optimize_edit_accept_without_stdout_prompts(self):
         with tempfile.TemporaryDirectory() as tmp:

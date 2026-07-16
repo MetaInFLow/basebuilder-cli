@@ -41,7 +41,7 @@ pipx install --force git+https://github.com/MetaInFLow/basebuilder-cli.git
 basebuilder login
 basebuilder doctor
 basebuilder whoami --format json
-basebuilder create --input input.json --format ndjson
+basebuilder create --input input.json --format json
 ```
 
 `basebuilder login` 成功后会自动为本机 agent 注册/轮换 agent token，不需要用户再打开一个 agent 注册确认页。只有 `doctor` 提示 token 缺失、吊销或需要重新注册时，才单独运行 `basebuilder agent register`。
@@ -69,7 +69,7 @@ basebuilder doctor --format json
 - 当前 API 地址是否能连通，生产默认是 `https://www.basebuilder.cn`。
 - 本地是否已经登录，token 是否过期/吊销。
 - 当前账号是否还有可识别的构建次数；次数为 0 时会提示去 Web 充值。
-- 本地最近 run 是否仍在运行，并提示 `basebuilder runs attach <run_id>`。
+- 本地最近 run 是否仍在运行，并提示 `basebuilder runs inspect <run_id> --format json`。
 - 本地是否安装 `larkcli` / `lark-cli`，用于复制到自己的 Lark 空间。
 
 `doctor` 本身不会发起构建，也不会直连 Builder。它只读取本地状态，并通过 `weave-ai-api` 做健康、登录和 run snapshot 检查。
@@ -79,7 +79,7 @@ basebuilder doctor --format json
 结构化输入贴近 GUI 人类首屏模版，不要把这些字段提前拼成一句长 prompt：
 
 ```bash
-basebuilder create --input input.json --format ndjson
+basebuilder create --input input.json --format json
 ```
 
 `input.json` 示例：
@@ -103,7 +103,7 @@ CLI 仍保留 `--prompt` 作为兼容入口；新 agent 或正式使用应优先
 
 ### AI 方案初稿确认
 
-CLI 里的“AI 方案初稿”就是 Web 里的三要素页面。它会等待 API 流式分析完成后输出：
+CLI 里的“AI 方案初稿”就是 Web 里的三要素页面。分析完成后会一次性输出：
 
 - 管理对象
 - 管理流程
@@ -115,8 +115,8 @@ CLI 里的“AI 方案初稿”就是 Web 里的三要素页面。它会等待 A
 Excel/CSV 结构优先模式：
 
 ```bash
-basebuilder create --mode excel --file renewal.csv --format ndjson
-basebuilder create --mode excel --file workbook.xlsx --file renewal.csv --file tickets.csv --format ndjson
+basebuilder create --mode excel --file renewal.csv --format json
+basebuilder create --mode excel --file workbook.xlsx --file renewal.csv --file tickets.csv --format json
 ```
 
 `--mode excel` 会把一个或多个表格文件作为共同的 source of truth 写入结构化 intake envelope。普通文本需求附带文件时，用 `--mode text --file spec.md --file notes.md`，表示文件只是背景上下文。
@@ -126,16 +126,15 @@ basebuilder create --mode excel --file workbook.xlsx --file renewal.csv --file t
 ### 进度、Report 和产物
 
 ```bash
-basebuilder create --prompt "..." --format ndjson
+basebuilder create --prompt "..." --format json
 basebuilder runs inspect <run_id> --format json
-basebuilder runs attach <run_id> --format ndjson
 basebuilder report generate <run_id> --out ./report.json
 basebuilder report render <run_id> --report ./report.json --out ./report.md
 basebuilder artifacts manual <run_id> --from-report ./report.json --out ./manual.md
 basebuilder artifacts skill <run_id> --from-report ./report.json --out ./base-skill
 ```
 
-`create` 在任务启动成功后立即返回，默认不持续轮询服务器。查看一次状态使用 `runs inspect`；明确需要等待完成时使用 `runs attach`，或在创建时显式添加 `--wait`。相同结构化需求已有进行中的 run 时，CLI 会复用该 run 并阻止再次创建。
+`create` 通过 JSON 异步协议启动任务，成功后立即返回，不建立生成 SSE。之后只用 `runs inspect` 读取服务器状态：`queued/running/retrying` 继续等待，`succeeded` 表示完成，`failed/timed_out/cancelled/interrupted` 表示终止，`unknown` 表示当前无法确认。CLI 本地文件只是 run 句柄缓存；重复创建前必须先刷新服务器状态，无法确认时停止新建，避免重复扣费。
 
 `report.json` 是 manual 和 per-Base Skill 的机器真相源。它来自 API 返回的 sanitized final artifact，不包含 token、cookie、raw prompt 或内部 Builder 诊断。
 

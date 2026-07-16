@@ -121,6 +121,56 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(compact["status"], "success")
         self.assertTrue(_is_terminal_snapshot(snapshot))
 
+    def test_request_status_overrides_task_aggregate_and_delivery_heuristics(self):
+        snapshot = {
+            "status": "success",
+            "request": {
+                "id": "request_failed",
+                "status": "failed",
+            },
+            "last_success_step": "fast_build.finalize",
+            "snapshot": {
+                "feishu_url": "https://weave-ai.feishu.cn/base/stale",
+                "table_name": "旧交付",
+            },
+        }
+
+        compact = compact_progress_data(snapshot)
+
+        self.assertEqual(compact["status"], "failed")
+        self.assertTrue(_is_terminal_snapshot(snapshot))
+
+    def test_running_request_is_not_terminal_when_task_aggregate_is_success(self):
+        snapshot = {
+            "status": "success",
+            "request": {
+                "id": "request_running",
+                "status": "running",
+            },
+        }
+
+        self.assertFalse(_is_terminal_snapshot(snapshot))
+
+    def test_start_build_explicitly_requests_non_streaming_execution(self):
+        client = BaseBuilderApiClient("https://www.basebuilder.cn")
+        with unittest.mock.patch.object(
+            client,
+            "_request",
+            return_value={"runId": "message_123"},
+        ) as request:
+            client.start_build(
+                {
+                    "manage_what": "客户",
+                    "workflow": "录入->跟进",
+                    "fields": "名称,状态",
+                },
+                message_id=123,
+                task_id="task_123",
+            )
+
+        body = request.call_args.args[2]
+        self.assertIs(body["stream"], False)
+
 
 if __name__ == "__main__":
     unittest.main()

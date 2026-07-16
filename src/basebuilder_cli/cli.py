@@ -339,11 +339,11 @@ def cmd_create(args: argparse.Namespace) -> int:
         files=args.file,
         structured_input=structured_input,
     )
-    active_run = find_matching_active_run(prompt)
+    client = BaseBuilderApiClient(cfg.api_base, cfg.token)
+    active_run = find_matching_active_run(client, prompt)
     if active_run:
         return emit_reused_active_run(args.format, active_run)
 
-    client = BaseBuilderApiClient(cfg.api_base, cfg.token)
     emitted_stdout = False
     if not args.auto_accept and sys.stdin.isatty():
         result, emitted_stdout = run_interactive_create(client, prompt, args.format)
@@ -404,7 +404,6 @@ def cmd_create(args: argparse.Namespace) -> int:
     elif result.status == "building" and args.format == "human":
         print("任务已在后台运行，CLI 不会持续轮询。")
         print(f"查看一次状态: basebuilder runs inspect {run_id} --format json")
-        print(f"需要持续等待时: basebuilder runs attach {run_id} --format ndjson")
     return 0
 
 
@@ -750,12 +749,11 @@ def create_result_payload(result: CreateResult, run_id: str) -> dict[str, Any]:
     else:
         payload["nextSteps"] = [
             f"运行 `basebuilder runs inspect {run_id} --format json` 查看一次当前状态。",
-            f"只有需要持续等待时才运行 `basebuilder runs attach {run_id} --format ndjson`。",
         ]
     return payload
 
 
-def find_matching_active_run(prompt: str) -> dict[str, Any] | None:
+def find_matching_active_run(client: BaseBuilderApiClient, prompt: str) -> dict[str, Any] | None:
     active_statuses = {
         "building",
         "analyzing",
@@ -770,14 +768,47 @@ def find_matching_active_run(prompt: str) -> dict[str, Any] | None:
     for row in list_runs():
         if str(row.get("prompt") or "") != prompt:
             continue
-        status = str(
-            row.get("status")
-            or first_mapping(row.get("snapshot")).get("status")
-            or first_mapping(row.get("latest_progress")).get("status")
-            or ""
-        ).strip().lower()
+
+        run_id = str(row.get("run_id") or "")
+        if not run_id:
+            continue
+        try:
+            snapshot = compact_progress_data(client.run_snapshot(run_id))
+        except ApiError as exc:
+            if exc.code == "RUN_NOT_FOUND":
+                save_run(run_id, {
+                    "status": "not_found",
+                    "status_source": "server",
+                })
+                continue
+            save_run(run_id, {
+                "status": "unknown",
+                "status_source": "server_unreachable",
+                "status_error": {
+                    "code": exc.code,
+                    "message": str(exc),
+                },
+            })
+            raise ApiError(
+                "RUN_STATUS_UNAVAILABLE",
+                "无法确认上一次任务的服务器状态。为避免重复创建和扣费，本次没有启动新任务；请稍后运行 runs inspect。",
+                retryable=True,
+            ) from exc
+
+        status = str(snapshot.get("status") or "").strip().lower()
+        updated = {
+            **row,
+            "snapshot": snapshot,
+            "status": status or "unknown",
+            "status_source": str(snapshot.get("statusSource") or "server"),
+        }
+        save_run(run_id, {
+            "snapshot": snapshot,
+            "status": updated["status"],
+            "status_source": updated["status_source"],
+        })
         if status in active_statuses:
-            return row
+            return updated
     return None
 
 
@@ -793,7 +824,6 @@ def emit_reused_active_run(fmt: str, row: dict[str, Any]) -> int:
         "duplicatePrevented": True,
         "nextSteps": [
             f"运行 `basebuilder runs inspect {run_id} --format json` 查看一次当前状态。",
-            f"只有需要持续等待时才运行 `basebuilder runs attach {run_id} --format ndjson`。",
         ],
     }
     if fmt in {"json", "ndjson"}:
@@ -861,18 +891,20 @@ def compact_progress_data(data: dict[str, Any]) -> dict[str, Any]:
     delivery = first_mapping(raw.get("delivery"), last_event.get("delivery"))
     delivery_data = first_mapping(delivery.get("data"))
     snapshot = first_mapping(raw.get("snapshot"))
+    request = first_mapping(raw.get("request"))
 
     result: dict[str, Any] = {}
-    copy_first(result, "status", raw, last_event, keys=["status", "state", "queue_state"])
+    copy_first(result, "status", request, raw, last_event, keys=["status", "state", "queue_state"])
     copy_first(result, "state", raw, last_event, keys=["state", "queue_state"])
     copy_first(result, "progress", raw, last_event, keys=["progress"])
     copy_first(result, "currentStep", raw, last_event, keys=["current_step", "step"])
     copy_first(result, "lastSuccessStep", raw, keys=["last_success_step"])
     copy_first(result, "message", raw, last_event, keys=["message", "description", "last_message"])
     copy_first(result, "taskId", raw, keys=["task_id", "taskId"])
-    copy_first(result, "requestId", raw, keys=["request_id", "requestId"])
-    copy_first(result, "buildRunId", raw, last_event, keys=["run_id", "buildRunId"])
     copy_first(result, "messageId", raw, keys=["message_id", "messageId"])
+    copy_first(result, "requestId", request, raw, keys=["request_id", "requestId"])
+    copy_first(result, "buildRunId", request, raw, last_event, keys=["run_id", "buildRunId"])
+    copy_first(result, "statusSource", raw, keys=["statusSource", "status_source"])
     copy_first(result, "baseUrl", raw, delivery_data, snapshot, keys=["baseUrl", "base_url", "url", "app_url", "feishu_url"])
     copy_first(result, "tableName", raw, delivery_data, snapshot, keys=["table_name", "tableName", "name"])
 
@@ -906,7 +938,8 @@ def compact_progress_data(data: dict[str, Any]) -> dict[str, Any]:
 
     if not result:
         return {key: value for key, value in data.items() if key not in {"answer_text", "problem_text"}}
-    normalize_finalized_delivery(result)
+    if not request:
+        normalize_finalized_delivery(result)
     return result
 
 
