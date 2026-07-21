@@ -90,11 +90,14 @@ class FakeInteractiveClient:
 
 
 class FakeInspectClient:
+    last_run_id = ""
+
     def __init__(self, api_base, token=""):
         self.api_base = api_base
         self.token = token
 
     def run_snapshot(self, run_id):
+        FakeInspectClient.last_run_id = run_id
         return {
             "status": "success",
             "progress": 100,
@@ -102,12 +105,39 @@ class FakeInspectClient:
         }
 
 
+class FakeConfirmClient:
+    start_calls = []
+
+    def __init__(self, api_base, token=""):
+        self.api_base = api_base
+        self.token = token
+
+    def analyze(self, prompt):
+        raise AssertionError("confirm must not analyze again")
+
+    def start_build(self, elements, message_id=None, task_id=None):
+        self.__class__.start_calls.append((elements, message_id, task_id))
+        return {
+            "runId": f"message_{message_id}",
+            "messageId": message_id,
+            "taskId": task_id,
+            "status": "running",
+            "reused": len(self.__class__.start_calls) > 1,
+        }
+
+    def attach_progress(self, run_id):
+        return iter([])
+
+
 class FakeVerboseAttachClient:
+    last_run_id = ""
+
     def __init__(self, api_base, token=""):
         self.api_base = api_base
         self.token = token
 
     def attach_progress(self, run_id):
+        self.__class__.last_run_id = run_id
         return iter([
             StreamEvent("snapshot", {
                 "success": True,
@@ -263,6 +293,18 @@ class CliCommandTest(unittest.TestCase):
         self.assertIn("multiple spreadsheet files", payload["intake"]["excel"])
         self.assertIn("agent register", payload["commands"])
         self.assertEqual(payload["api"]["agent_registration"]["production_base_url"], "https://www.basebuilder.cn")
+
+    def test_generic_skills_document_same_draft_confirmation_contract(self):
+        skill_paths = [
+            ROOT / "skills" / "basebuilder-cli" / "SKILL.md",
+            SRC / "basebuilder_cli" / "resources" / "basebuilder-cli" / "SKILL.md",
+        ]
+        for path in skill_paths:
+            content = path.read_text()
+            self.assertIn("basebuilder create confirm <draft-run-id> --format json", content)
+            self.assertIn("message_id", content)
+            self.assertIn("task_id", content)
+            self.assertIn("auto-accept", content)
 
     def test_create_ndjson_returns_after_start_without_polling(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -620,7 +662,190 @@ class CliCommandTest(unittest.TestCase):
         self.assertTrue(payload["data"]["confirmationRequired"])
         self.assertIn("backgroundKnowledge", payload["data"]["elements"])
         self.assertIn("确认方案", "\n".join(payload["data"]["nextSteps"]))
+        self.assertIn("basebuilder create confirm", "\n".join(payload["data"]["nextSteps"]))
         self.assertEqual(payload["data"]["run"], {})
+
+    def test_create_confirm_reuses_draft_context_without_second_analyze(self):
+        FakeConfirmClient.start_calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            draft_out = io.StringIO()
+            confirm_out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeCreateClient):
+                    with contextlib.redirect_stdout(draft_out):
+                        draft_exit = cli.main([
+                            "create",
+                            "--prompt",
+                            "做一个跨境电商进销存",
+                            "--format",
+                            "json",
+                        ])
+                draft_payload = json.loads(draft_out.getvalue())
+                draft_run_id = draft_payload["data"]["runId"]
+
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeConfirmClient):
+                    with contextlib.redirect_stdout(confirm_out):
+                        confirm_exit = cli.main([
+                            "create",
+                            "confirm",
+                            draft_run_id,
+                            "--format",
+                            "json",
+                        ])
+
+                rows = cli.list_runs()
+                resolved = cli.load_run(draft_run_id)
+                alias = json.loads((Path(tmp) / "runs" / draft_run_id / "run.json").read_text())
+
+        self.assertEqual(draft_exit, 0)
+        self.assertEqual(confirm_exit, 0)
+        payload = json.loads(confirm_out.getvalue())
+        self.assertEqual(payload["operation"], "builds.confirm")
+        self.assertEqual(payload["data"]["runId"], "message_123")
+        self.assertEqual(payload["data"]["confirmedFromDraftRunId"], draft_run_id)
+        self.assertEqual(len(FakeConfirmClient.start_calls), 1)
+        self.assertEqual(FakeConfirmClient.start_calls[0][1:], (123, "task_sample"))
+        self.assertEqual([row["run_id"] for row in rows], ["message_123"])
+        self.assertEqual(resolved["run_id"], "message_123")
+        self.assertEqual(alias["canonical_run_id"], "message_123")
+        self.assertEqual(alias["status"], "redirected")
+
+    def test_create_confirm_is_idempotent_for_same_draft_handle(self):
+        FakeConfirmClient.start_calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_run("run_draft", {
+                    "run_id": "run_draft",
+                    "status": "needs_confirmation",
+                    "message_id": 456,
+                    "task_id": "task_inventory",
+                    "elements": {
+                        "manage_what": "库存",
+                        "workflow": "录入 -> 盘点",
+                        "fields": "SKU、库存",
+                    },
+                })
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeConfirmClient):
+                    for _ in range(2):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            exit_code = cli.main([
+                                "create",
+                                "confirm",
+                                "run_draft",
+                                "--format",
+                                "json",
+                            ])
+                rows = cli.list_runs()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(FakeConfirmClient.start_calls), 2)
+        self.assertEqual(
+            [(message_id, task_id) for _, message_id, task_id in FakeConfirmClient.start_calls],
+            [(456, "task_inventory"), (456, "task_inventory")],
+        )
+        self.assertEqual([row["run_id"] for row in rows], ["message_456"])
+
+    def test_repeated_create_requires_confirming_matching_draft(self):
+        class MustNotCreateClient:
+            def __init__(self, api_base, token=""):
+                pass
+
+            def analyze(self, prompt):
+                raise AssertionError("matching draft must prevent a second analyze")
+
+            def run_snapshot(self, run_id):
+                raise AssertionError("local draft is not a server run")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            prompt = cli.build_intake_prompt(
+                prompt="做一个跨境电商进销存",
+                mode="text",
+                input_path="",
+                files=[],
+            )
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_run("run_draft", {
+                    "run_id": "run_draft",
+                    "prompt": prompt,
+                    "status": "needs_confirmation",
+                    "message_id": 123,
+                    "task_id": "task_sample",
+                    "elements": {
+                        "manage_what": "库存",
+                        "workflow": "录入 -> 盘点",
+                        "fields": "SKU、库存",
+                    },
+                })
+                with mock.patch.object(cli, "BaseBuilderApiClient", MustNotCreateClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main([
+                            "create",
+                            "--prompt",
+                            "做一个跨境电商进销存",
+                            "--format",
+                            "json",
+                            "--auto-accept",
+                        ])
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["error"]["code"], "DRAFT_CONFIRMATION_REQUIRED")
+        self.assertIn("basebuilder create confirm run_draft", payload["error"]["message"])
+
+    def test_create_confirm_rejects_incomplete_draft_without_api_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_run("run_broken", {
+                    "run_id": "run_broken",
+                    "status": "needs_confirmation",
+                    "message_id": 123,
+                    "elements": {
+                        "manage_what": "库存",
+                        "workflow": "录入 -> 盘点",
+                        "fields": "SKU、库存",
+                    },
+                })
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeConfirmClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main([
+                            "create",
+                            "confirm",
+                            "run_broken",
+                            "--format",
+                            "json",
+                        ])
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["error"]["code"], "DRAFT_TASK_CONTEXT_MISSING")
+
+    def test_runs_inspect_resolves_confirmed_draft_alias(self):
+        FakeInspectClient.last_run_id = ""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_config(cli.CliConfig(api_base="https://www.basebuilder.cn", token="token_sample"))
+                cli.save_run("message_123", {
+                    "run_id": "message_123",
+                    "canonical_run_id": "message_123",
+                    "draft_run_id": "run_draft",
+                    "status": "running",
+                })
+                cli.save_run("run_draft", {
+                    "run_id": "run_draft",
+                    "canonical_run_id": "message_123",
+                    "status": "redirected",
+                })
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeInspectClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main(["runs", "inspect", "run_draft", "--format", "json"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(FakeInspectClient.last_run_id, "message_123")
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["data"]["run_id"], "message_123")
 
     def test_runs_inspect_fetches_api_snapshot_when_token_available(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -659,6 +884,30 @@ class CliCommandTest(unittest.TestCase):
         self.assertNotIn("answer_text", encoded)
         self.assertNotIn("problem_text", encoded)
         self.assertNotIn("secret", encoded)
+
+    def test_runs_attach_resolves_confirmed_draft_alias(self):
+        FakeVerboseAttachClient.last_run_id = ""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"BB_HOME": tmp, "BB_API_BASE": "https://www.basebuilder.cn"}):
+                cli.save_run("message_123", {
+                    "run_id": "message_123",
+                    "canonical_run_id": "message_123",
+                    "status": "running",
+                })
+                cli.save_run("run_draft", {
+                    "run_id": "run_draft",
+                    "canonical_run_id": "message_123",
+                    "status": "redirected",
+                })
+                with mock.patch.object(cli, "BaseBuilderApiClient", FakeVerboseAttachClient):
+                    with contextlib.redirect_stdout(out):
+                        exit_code = cli.main(["runs", "attach", "run_draft", "--format", "ndjson"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(FakeVerboseAttachClient.last_run_id, "message_123")
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["meta"]["runId"], "message_123")
 
     def test_client_treats_legacy_success_false_response_as_api_error(self):
         client = BaseBuilderApiClient("https://www.basebuilder.cn")

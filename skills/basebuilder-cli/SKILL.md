@@ -75,9 +75,17 @@ Agent 调用时优先使用结构化输入，不要把首页的一组字段拼�
 basebuilder create --input input.json --format json
 ```
 
-`create` 使用 JSON 异步启动协议，不接收生成 SSE。保存返回的 `runId`，后续只用 `basebuilder runs inspect <run_id> --format json` 读取服务器状态。`queued/running/retrying` 继续等待，`succeeded` 才算完成；`failed/timed_out/cancelled/interrupted` 停止；`unknown` 表示状态无法确认，此时严禁再次执行 `create`。本地 run 只保存句柄，是否复用必须以服务器状态为准。
+如果返回 `confirmationRequired=true`，这个 `runId` 是待确认草稿句柄。先向用户展示三要素，得到明确确认后运行：
 
-AI 方案初稿就是三要素页面。用户确认前不要使用 `--auto-accept`，除非用户明确要求跳过 review。非交互自动化里，先展示拆解出的管理对象、管理流程、关键信息和背景知识，拿到确认后再继续。
+```bash
+basebuilder create confirm <draft-run-id> --format json
+```
+
+`confirm` 必须复用草稿中的 `message_id`、`task_id` 和三要素，不能再次 analyze。拿到确认后严禁重新执行 `create` 或 `create --auto-accept`；confirm 失败时也不得 fallback 新建任务。`--auto-accept` 只用于用户从一开始就明确授权跳过 review 的可信自动化。
+
+正式构建使用 JSON 异步启动协议，不接收生成 SSE。保存 confirm 或可信自动化返回的 canonical `runId`，后续只用 `basebuilder runs inspect <run_id> --format json` 读取服务器状态。`queued/running/retrying` 继续等待，`succeeded` 才算完成；`failed/timed_out/cancelled/interrupted` 停止；`unknown` 表示状态无法确认，此时严禁再次执行 `create`。本地 run 只保存句柄，是否复用必须以服务器状态为准。
+
+AI 方案初稿就是三要素页面。非交互自动化里，先展示拆解出的管理对象、管理流程、关键信息和背景知识，拿到确认后用 `create confirm` 恢复同一个任务。
 
 多输入模式：
 
@@ -94,6 +102,7 @@ basebuilder create --mode excel --file workbook.xlsx --file data.csv --format js
 
 ```bash
 basebuilder runs list --format json
+basebuilder create confirm <draft-run-id> --format json
 basebuilder runs inspect <run_id> --format json
 basebuilder report generate <run_id> --out ./report.json
 basebuilder report render <run_id> --report ./report.json --out ./report.md

@@ -110,7 +110,13 @@ CLI 里的“AI 方案初稿”就是 Web 里的三要素页面。分析完成�
 - 关键信息
 - 背景知识
 
-默认不会直接开始搭建。用户需要在交互模式输入 `accept`，或明确使用 `--auto-accept`，才会进入生成。需要修改时可以选择 `edit`，或用 `optimize` 加一句调整要求；`optimize` 可以继续附加多个文件作为上下文。
+默认不会直接开始搭建。交互模式可以直接输入 `accept`；非交互模式返回 `confirmationRequired=true` 和本地草稿 `runId` 后，必须先向用户展示三要素，确认后恢复该草稿：
+
+```bash
+basebuilder create confirm <draft-run-id> --format json
+```
+
+`confirm` 会复用草稿中的 `message_id`、`task_id` 和三要素，不会再次执行 analyze。不要在用户确认后重新运行 `create` 或 `create --auto-accept`，否则会破坏同一任务的会话 lineage；CLI 也会用 `DRAFT_CONFIRMATION_REQUIRED` 阻止相同需求绕过待确认草稿。`--auto-accept` 只用于用户从一开始就明确授权跳过 review 的可信自动化。需要修改时可以选择 `edit`，或用 `optimize` 加一句调整要求；`optimize` 可以继续附加多个文件作为上下文。
 
 Excel/CSV 结构优先模式：
 
@@ -127,6 +133,7 @@ basebuilder create --mode excel --file workbook.xlsx --file renewal.csv --file t
 
 ```bash
 basebuilder create --prompt "..." --format json
+basebuilder create confirm <draft-run-id> --format json
 basebuilder runs inspect <run_id> --format json
 basebuilder report generate <run_id> --out ./report.json
 basebuilder report render <run_id> --report ./report.json --out ./report.md
