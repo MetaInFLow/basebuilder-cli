@@ -19,7 +19,7 @@ from .fingerprint import build_fingerprint
 from .intake import build_intake_prompt, build_refine_instruction
 from .protocol import dumps, error_envelope, ok_envelope
 from .report import build_report, materialize_report_artifact, merge_copy_result, read_report, render_report_markdown, require_larkcli, write_report
-from .runs import list_runs, load_run, new_run_id, save_run
+from .runs import list_runs, load_run, new_run_id, promote_run, resolve_run_id, save_run
 
 
 COMMANDS = [
@@ -29,6 +29,7 @@ COMMANDS = [
     "logout",
     "whoami",
     "create",
+    "create confirm",
     "runs list",
     "runs inspect",
     "runs attach",
@@ -99,12 +100,19 @@ def build_parser() -> argparse.ArgumentParser:
     whoami.set_defaults(func=cmd_whoami, operation="me")
 
     create = sub.add_parser("create")
+    create.add_argument("create_action", nargs="?", choices=["confirm"])
+    create.add_argument("draft_run_id", nargs="?")
     create.add_argument("--prompt", default="")
     create.add_argument("--input", default="", help="JSON structured intake file.")
     create.add_argument("--mode", choices=["text", "excel"], default="text")
     create.add_argument("--file", action="append", default=[])
     create.add_argument("--format", choices=["human", "json", "ndjson"], default="human")
     create.add_argument("--auto-accept", action="store_true")
+    create.add_argument(
+        "--wait",
+        action="store_true",
+        help="Keep polling until the build finishes. By default create returns after the task starts.",
+    )
     create.set_defaults(func=cmd_create, operation="builds.create")
 
     runs = sub.add_parser("runs")
@@ -319,8 +327,10 @@ def cmd_whoami(args: argparse.Namespace) -> int:
 
 
 def cmd_create(args: argparse.Namespace) -> int:
+    if args.create_action == "confirm":
+        return cmd_create_confirm(args)
+
     cfg = make_config(args)
-    client = BaseBuilderApiClient(cfg.api_base, cfg.token)
     prompt_text = args.prompt
     structured_input: dict[str, Any] | None = None
     if not prompt_text and not args.input and not args.file:
@@ -335,6 +345,11 @@ def cmd_create(args: argparse.Namespace) -> int:
         files=args.file,
         structured_input=structured_input,
     )
+    client = BaseBuilderApiClient(cfg.api_base, cfg.token)
+    active_run = find_matching_active_run(client, prompt)
+    if active_run:
+        return emit_reused_active_run(args.format, active_run)
+
     emitted_stdout = False
     if not args.auto_accept and sys.stdin.isatty():
         result, emitted_stdout = run_interactive_create(client, prompt, args.format)
@@ -377,7 +392,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         print("状态: " + result.status)
         print("run_id: " + run_id)
 
-    if result.status == "building" and args.format in {"human", "ndjson"}:
+    if result.status == "building" and args.wait and args.format in {"human", "ndjson"}:
         for event in client.attach_progress(run_id):
             latest_progress = compact_progress_data(event.data)
             if args.format == "ndjson":
@@ -392,6 +407,106 @@ def cmd_create(args: argparse.Namespace) -> int:
         })
         if args.format == "human" and result.status == "building":
             print_post_build_guidance(run_id, latest_progress)
+    elif result.status == "building" and args.format == "human":
+        print("任务已在后台运行，CLI 不会持续轮询。")
+        print(f"查看一次状态: basebuilder runs inspect {run_id} --format json")
+    return 0
+
+
+def cmd_create_confirm(args: argparse.Namespace) -> int:
+    draft_run_id = str(args.draft_run_id or "").strip()
+    if not draft_run_id:
+        raise ApiError(
+            "DRAFT_RUN_ID_REQUIRED",
+            "请提供待确认的草稿 run id：basebuilder create confirm <draft-run-id>。",
+            retryable=False,
+        )
+
+    try:
+        row = load_run(draft_run_id)
+    except FileNotFoundError as exc:
+        raise ApiError("DRAFT_RUN_NOT_FOUND", f"未找到本地草稿 run：{draft_run_id}", retryable=False) from exc
+
+    try:
+        message_id = int(row.get("message_id") or 0)
+    except (TypeError, ValueError):
+        message_id = 0
+    task_id = str(row.get("task_id") or "").strip()
+    if message_id <= 0 or not task_id:
+        raise ApiError(
+            "DRAFT_TASK_CONTEXT_MISSING",
+            "草稿缺少 message_id 或 task_id，已停止确认；不会创建新任务。",
+            retryable=False,
+        )
+
+    elements = normalize_elements(row.get("elements") if isinstance(row.get("elements"), dict) else {})
+    if any(not str(getattr(elements, key) or "").strip() for key in ("manage_what", "workflow", "fields")):
+        raise ApiError(
+            "DRAFT_ELEMENTS_INVALID",
+            "草稿三要素不完整，已停止确认；不会创建新任务。",
+            retryable=False,
+        )
+
+    cfg = make_config(args)
+    client = BaseBuilderApiClient(cfg.api_base, cfg.token)
+    run = client.start_build(elements, message_id=message_id, task_id=task_id)
+    canonical_run_id = str(run.get("runId") or run.get("run_id") or f"message_{message_id}").strip()
+    if not canonical_run_id:
+        raise ApiError("BUILD_RUN_ID_MISSING", "服务端未返回 run id，草稿仍保留，请稍后重试确认。", retryable=True)
+
+    status = str(run.get("status") or "building").strip() or "building"
+    source_draft_run_id = str(row.get("draft_run_id") or draft_run_id).strip() or draft_run_id
+    promote_run(source_draft_run_id, canonical_run_id, {
+        **row,
+        "api_run": run,
+        "status": status,
+        "message_id": message_id,
+        "task_id": extract_task_id(run) or task_id,
+    })
+
+    result = CreateResult(
+        status=status,
+        elements=elements,
+        run=run,
+        message_id=message_id,
+        task_id=extract_task_id(run) or task_id,
+    )
+    payload = create_result_payload(result, canonical_run_id)
+    payload["confirmedFromDraftRunId"] = source_draft_run_id
+
+    if args.format in {"json", "ndjson"}:
+        print(dumps(ok_envelope("builds.confirm", payload, {
+            "runId": canonical_run_id,
+            "messageId": message_id,
+            "taskId": result.task_id,
+            "draftRunId": source_draft_run_id,
+        })))
+    else:
+        print("方案已确认，已在原任务上开始搭建。")
+        print("run_id: " + canonical_run_id)
+
+    latest_progress: dict[str, Any] = {}
+    if args.wait and args.format in {"human", "ndjson"}:
+        for event in client.attach_progress(canonical_run_id):
+            latest_progress = compact_progress_data(event.data)
+            if args.format == "ndjson":
+                print(dumps(ok_envelope("runs.attach.progress", latest_progress, {
+                    "event": event.type,
+                    "runId": canonical_run_id,
+                })))
+            else:
+                print_progress_event(event.type, latest_progress)
+
+    if latest_progress:
+        save_run(canonical_run_id, {
+            "latest_progress": latest_progress,
+            "status": str(latest_progress.get("status") or latest_progress.get("state") or status),
+        })
+        if args.format == "human":
+            print_post_build_guidance(canonical_run_id, latest_progress)
+    elif args.format == "human":
+        print("任务已在后台运行，CLI 不会持续轮询。")
+        print(f"查看一次状态: basebuilder runs inspect {canonical_run_id} --format json")
     return 0
 
 
@@ -407,22 +522,24 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
 
 def cmd_runs_inspect(args: argparse.Namespace) -> int:
     row = load_run(args.run_id)
+    canonical_run_id = resolve_run_id(args.run_id)
     cfg = make_config(args)
     if cfg.token:
-        snapshot = compact_progress_data(BaseBuilderApiClient(cfg.api_base, cfg.token).run_snapshot(args.run_id))
+        snapshot = compact_progress_data(BaseBuilderApiClient(cfg.api_base, cfg.token).run_snapshot(canonical_run_id))
         row["snapshot"] = snapshot
         row["status"] = str(snapshot.get("status") or snapshot.get("state") or row.get("status") or "")
-        save_run(args.run_id, {"snapshot": snapshot, "status": row["status"]})
+        save_run(canonical_run_id, {"snapshot": snapshot, "status": row["status"]})
     return emit(args.format, "runs.inspect", row, human=json.dumps(row, ensure_ascii=False, indent=2))
 
 
 def cmd_runs_attach(args: argparse.Namespace) -> int:
     cfg = make_config(args)
     client = BaseBuilderApiClient(cfg.api_base, cfg.token)
-    for event in client.attach_progress(args.run_id):
+    canonical_run_id = resolve_run_id(args.run_id)
+    for event in client.attach_progress(canonical_run_id):
         data = compact_progress_data(event.data)
         if args.format == "ndjson":
-            print(dumps(ok_envelope("runs.attach.progress", data, {"event": event.type, "runId": args.run_id})))
+            print(dumps(ok_envelope("runs.attach.progress", data, {"event": event.type, "runId": canonical_run_id})))
         else:
             print(f"{event.type}: {json.dumps(data, ensure_ascii=False)}")
     return 0
@@ -731,14 +848,108 @@ def create_result_payload(result: CreateResult, run_id: str) -> dict[str, Any]:
     }
     if needs_confirmation:
         payload["nextSteps"] = [
-            "确认方案后再开始生成：交互模式输入 accept，或明确使用 --auto-accept。",
+            f"向用户展示并确认方案后，运行 `basebuilder create confirm {run_id} --format json`。",
+            "不要重新执行 create 或 create --auto-accept；确认必须恢复当前草稿的 message_id/task_id。",
             "如需修改 AI 方案初稿，使用 edit 或 optimize；optimize 可继续附加多个文件。",
         ]
     else:
         payload["nextSteps"] = [
-            f"运行 `basebuilder runs attach {run_id}` 查看生成进度。",
+            f"运行 `basebuilder runs inspect {run_id} --format json` 查看一次当前状态。",
         ]
     return payload
+
+
+def find_matching_active_run(client: BaseBuilderApiClient, prompt: str) -> dict[str, Any] | None:
+    active_statuses = {
+        "building",
+        "analyzing",
+        "running",
+        "started",
+        "queued",
+        "pending",
+        "processing",
+        "in_progress",
+        "retrying",
+    }
+    for row in list_runs():
+        if str(row.get("prompt") or "") != prompt:
+            continue
+
+        run_id = str(row.get("run_id") or "")
+        if not run_id:
+            continue
+        if str(row.get("status") or "").strip().lower() == "needs_confirmation":
+            raise ApiError(
+                "DRAFT_CONFIRMATION_REQUIRED",
+                f"相同需求已有待确认草稿 {run_id}；请先向用户展示三要素，再运行 "
+                f"`basebuilder create confirm {run_id} --format json`。本次没有创建新任务。",
+                retryable=False,
+            )
+        try:
+            snapshot = compact_progress_data(client.run_snapshot(run_id))
+        except ApiError as exc:
+            if exc.code == "RUN_NOT_FOUND":
+                save_run(run_id, {
+                    "status": "not_found",
+                    "status_source": "server",
+                })
+                continue
+            save_run(run_id, {
+                "status": "unknown",
+                "status_source": "server_unreachable",
+                "status_error": {
+                    "code": exc.code,
+                    "message": str(exc),
+                },
+            })
+            raise ApiError(
+                "RUN_STATUS_UNAVAILABLE",
+                "无法确认上一次任务的服务器状态。为避免重复创建和扣费，本次没有启动新任务；请稍后运行 runs inspect。",
+                retryable=True,
+            ) from exc
+
+        status = str(snapshot.get("status") or "").strip().lower()
+        updated = {
+            **row,
+            "snapshot": snapshot,
+            "status": status or "unknown",
+            "status_source": str(snapshot.get("statusSource") or "server"),
+        }
+        save_run(run_id, {
+            "snapshot": snapshot,
+            "status": updated["status"],
+            "status_source": updated["status_source"],
+        })
+        if status in active_statuses:
+            return updated
+    return None
+
+
+def emit_reused_active_run(fmt: str, row: dict[str, Any]) -> int:
+    run_id = str(row.get("run_id") or "")
+    data = {
+        "status": str(row.get("status") or "building"),
+        "stage": "building",
+        "runId": run_id,
+        "messageId": int(row.get("message_id") or 0),
+        "taskId": str(row.get("task_id") or ""),
+        "reused": True,
+        "duplicatePrevented": True,
+        "nextSteps": [
+            f"运行 `basebuilder runs inspect {run_id} --format json` 查看一次当前状态。",
+        ],
+    }
+    if fmt in {"json", "ndjson"}:
+        print(dumps(ok_envelope("builds.create", data, {
+            "runId": run_id,
+            "messageId": data["messageId"],
+            "taskId": data["taskId"],
+        })))
+    else:
+        print("检测到相同需求已有进行中的任务，已阻止重复创建和重复扣费。")
+        print("run_id: " + run_id)
+        print(f"查看一次状态: basebuilder runs inspect {run_id} --format json")
+    return 0
 
 
 def print_post_build_guidance(run_id: str, progress: dict[str, Any]) -> None:
@@ -793,18 +1004,20 @@ def compact_progress_data(data: dict[str, Any]) -> dict[str, Any]:
     delivery = first_mapping(raw.get("delivery"), last_event.get("delivery"))
     delivery_data = first_mapping(delivery.get("data"))
     snapshot = first_mapping(raw.get("snapshot"))
+    request = first_mapping(raw.get("request"))
 
     result: dict[str, Any] = {}
-    copy_first(result, "status", raw, last_event, keys=["status", "state", "queue_state"])
+    copy_first(result, "status", request, raw, last_event, keys=["status", "state", "queue_state"])
     copy_first(result, "state", raw, last_event, keys=["state", "queue_state"])
     copy_first(result, "progress", raw, last_event, keys=["progress"])
     copy_first(result, "currentStep", raw, last_event, keys=["current_step", "step"])
     copy_first(result, "lastSuccessStep", raw, keys=["last_success_step"])
     copy_first(result, "message", raw, last_event, keys=["message", "description", "last_message"])
     copy_first(result, "taskId", raw, keys=["task_id", "taskId"])
-    copy_first(result, "requestId", raw, keys=["request_id", "requestId"])
-    copy_first(result, "buildRunId", raw, last_event, keys=["run_id", "buildRunId"])
     copy_first(result, "messageId", raw, keys=["message_id", "messageId"])
+    copy_first(result, "requestId", request, raw, keys=["request_id", "requestId"])
+    copy_first(result, "buildRunId", request, raw, last_event, keys=["run_id", "buildRunId"])
+    copy_first(result, "statusSource", raw, keys=["statusSource", "status_source"])
     copy_first(result, "baseUrl", raw, delivery_data, snapshot, keys=["baseUrl", "base_url", "url", "app_url", "feishu_url"])
     copy_first(result, "tableName", raw, delivery_data, snapshot, keys=["table_name", "tableName", "name"])
 
@@ -838,7 +1051,8 @@ def compact_progress_data(data: dict[str, Any]) -> dict[str, Any]:
 
     if not result:
         return {key: value for key, value in data.items() if key not in {"answer_text", "problem_text"}}
-    normalize_finalized_delivery(result)
+    if not request:
+        normalize_finalized_delivery(result)
     return result
 
 

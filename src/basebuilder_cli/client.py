@@ -95,7 +95,10 @@ class BaseBuilderApiClient:
         )
 
     def start_build(self, elements: Any, message_id: int | None = None, task_id: str | None = None) -> dict[str, Any]:
-        payload: dict[str, Any] = {"confirmed_elements": _as_mapping(elements)}
+        payload: dict[str, Any] = {
+            "confirmed_elements": _as_mapping(elements),
+            "stream": False,
+        }
         if message_id:
             payload["message_id"] = int(message_id)
         if task_id:
@@ -112,7 +115,7 @@ class BaseBuilderApiClient:
         self,
         run_id: str,
         *,
-        poll_interval: float = 5.0,
+        poll_interval: float = 15.0,
         max_polls: int | None = None,
     ) -> Iterable[StreamEvent]:
         polls = 0
@@ -211,6 +214,7 @@ def _is_terminal_snapshot(payload: dict[str, Any]) -> bool:
         "interrupted",
         "denied",
         "expired",
+        "timed_out",
     }
     active = {
         "running",
@@ -222,6 +226,14 @@ def _is_terminal_snapshot(payload: dict[str, Any]) -> bool:
         "retrying",
         "granted",
     }
+
+    request = _authoritative_request(candidates)
+    if request:
+        request_status = str(request.get("status") or "").strip().lower()
+        if request_status in terminal:
+            return True
+        if request_status in active:
+            return False
 
     has_finalized_delivery = any(
         str(candidate.get("last_success_step") or candidate.get("lastSuccessStep") or "") == "fast_build.finalize"
@@ -246,6 +258,14 @@ def _is_terminal_snapshot(payload: dict[str, Any]) -> bool:
             continue
 
     return False
+
+
+def _authoritative_request(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    for candidate in candidates:
+        request = candidate.get("request")
+        if isinstance(request, dict) and str(request.get("status") or "").strip():
+            return request
+    return {}
 
 
 def _snapshot_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
