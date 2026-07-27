@@ -7,6 +7,22 @@ description: Use when a user wants BaseBuilder to turn a business workflow, spre
 
 Use `basebuilder` as the only command-line entry for BaseBuilder user workflows. User-facing AI requests must go through `https://www.basebuilder.cn`; do not call Builder directly.
 
+## Version Check First
+
+Every time this Skill is loaded, make version checking the first action. Before any `basebuilder` command, login, diagnosis, or build, run:
+
+```bash
+python3 <skill-directory>/scripts/check_version.py
+```
+
+Resolve `<skill-directory>` to the directory containing this `SKILL.md`; do not execute the placeholder literally. Check only once per user task.
+
+- `up_to_date`: continue with `doctor`.
+- `update_available`: report the installed and latest commits, upgrade GitHub main with the original installation method, reinstall this Skill with `basebuilder skill install --target <current-target>`, and rerun the check before continuing. Continue on the old version only when the user explicitly asks to do so, and disclose the risk.
+- `editable_source_differs`: report the local and remote commits. Do not overwrite a development branch or uncommitted changes.
+- `not_installed`: follow the installation flow below.
+- `unknown` or `check_failed`: disclose that the latest version could not be confirmed. A network check failure does not block the current business task.
+
 ## Quick Start
 
 ```bash

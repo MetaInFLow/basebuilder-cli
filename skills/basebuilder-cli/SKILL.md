@@ -9,6 +9,22 @@ description: Use when a user wants BaseBuilder to turn a business workflow, spre
 
 使用 `basebuilder` 作为 BaseBuilder 用户工作流的唯一命令行入口。触发条件是用户要把业务流程、Excel/CSV、角色/场景/痛点模版或已有资料转成可运营的多维业务表。用户态 AI 请求必须进入 `https://www.basebuilder.cn` 背后的产品 API；不要直连 Builder 服务。
 
+## Version Check First
+
+每次加载本 Skill 后，把版本检查作为第一个动作；在任何 `basebuilder` 命令、登录、诊断或构建前运行：
+
+```bash
+python3 <skill-directory>/scripts/check_version.py
+```
+
+把 `<skill-directory>` 替换为当前 `SKILL.md` 所在目录，不要按字面执行占位符。每个用户任务只检查一次。
+
+- `up_to_date`：继续执行 `doctor`。
+- `update_available`：先向用户报告已安装与最新 commit，用原安装方式升级 GitHub main，重新执行 `basebuilder skill install --target <current-target>`，再次检查通过后继续。用户明确要求保留旧版时，记录风险后继续。
+- `editable_source_differs`：这是开发工作区；报告本地与远端 commit，不要自动覆盖分支或未提交变更。
+- `not_installed`：按下方安装流程处理。
+- `unknown` 或 `check_failed`：明确告知用户未能确认最新版本；网络检查失败不阻断当前业务任务。
+
 ## Install Or Verify
 
 ```bash

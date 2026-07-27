@@ -16,4 +16,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-basebuilder_cli = ["resources/basebuilder-cli/SKILL.md"]
+basebuilder_cli = [
+    "resources/basebuilder-cli/SKILL.md",
+    "resources/basebuilder-cli/scripts/check_version.py",
+]
