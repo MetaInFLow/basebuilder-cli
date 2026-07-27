@@ -20,7 +20,8 @@ python3 <skill-directory>/scripts/check_version.py
 把 `<skill-directory>` 替换为当前 `SKILL.md` 所在目录，不要按字面执行占位符。每个用户任务只检查一次。
 
 - `up_to_date`：继续执行 `doctor`。
-- `update_available`：先向用户报告已安装与最新 commit，用原安装方式升级 GitHub main，重新执行 `basebuilder skill install --target <current-target>`，再次检查通过后继续。用户明确要求保留旧版时，记录风险后继续。
+- `update_available`：先向用户报告已安装与最新 Release，用原安装方式升级到最新稳定 tag，重新执行 `basebuilder skill install --target <current-target>`，再次检查通过后继续。用户明确要求保留旧版时，记录风险后继续。
+- `ahead_of_release`：已安装版本高于最新 Release；标记为开发版并继续，不要降级。
 - `editable_source_differs`：这是开发工作区；报告本地与远端 commit，不要自动覆盖分支或未提交变更。
 - `not_installed`：按下方安装流程处理。
 - `unknown` 或 `check_failed`：明确告知用户未能确认最新版本；网络检查失败不阻断当前业务任务。
@@ -28,7 +29,7 @@ python3 <skill-directory>/scripts/check_version.py
 ## Install Or Verify
 
 ```bash
-python3 -m pip install --user git+https://github.com/MetaInFLow/basebuilder-cli.git
+python3 -m pip install --user "git+https://github.com/MetaInFLow/basebuilder-cli.git@v0.2.0"
 basebuilder doctor --format json
 basebuilder skill install --target codex
 ```
@@ -36,7 +37,7 @@ basebuilder skill install --target codex
 如果需要隔离安装，优先使用：
 
 ```bash
-pipx install git+https://github.com/MetaInFLow/basebuilder-cli.git
+pipx install "git+https://github.com/MetaInFLow/basebuilder-cli.git@v0.2.0"
 basebuilder skill install --target codex
 ```
 

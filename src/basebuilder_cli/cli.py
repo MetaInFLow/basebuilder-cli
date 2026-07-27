@@ -68,6 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"{DEFAULT_API_BASE} over HTTPS. Local 127.* addresses are for explicit dev smoke only."
         ),
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "--api-base",
         default=None,

@@ -267,6 +267,15 @@ class FakeUrlopenResponse:
 
 
 class CliCommandTest(unittest.TestCase):
+    def test_top_level_version_flag_reports_release_version(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit) as raised:
+                cli.main(["--version"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertEqual(out.getvalue().strip(), "basebuilder 0.2.0")
+
     def test_default_api_base_is_production_www_basebuilder(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()

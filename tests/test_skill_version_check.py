@@ -40,6 +40,57 @@ class SkillVersionCheckTest(unittest.TestCase):
         self.assertEqual(checker.classify("abc", "def", editable=True), "editable_source_differs")
         self.assertEqual(checker.classify("", "def", editable=False), "unknown")
 
+    def test_checker_selects_latest_stable_release_tag(self):
+        checker = load_checker()
+        tags = "\n".join([
+            "aaaaaaaa refs/tags/v0.1.0",
+            "bbbbbbbb refs/tags/v0.2.0",
+            "cccccccc refs/tags/v0.2.0^{}",
+            "dddddddd refs/tags/v0.3.0rc1",
+        ])
+
+        self.assertEqual(checker.parse_release_tags(tags), {
+            "version": "0.2.0",
+            "tag": "v0.2.0",
+            "commit": "cccccccc",
+        })
+
+    def test_checker_classifies_release_versions(self):
+        checker = load_checker()
+        self.assertEqual(checker.classify_version("0.1.0", "0.2.0"), "update_available")
+        self.assertEqual(checker.classify_version("0.2.0", "0.2.0"), "up_to_date")
+        self.assertEqual(checker.classify_version("0.3.0", "0.2.0"), "ahead_of_release")
+        self.assertEqual(checker.classify_version("dev", "0.2.0"), "unknown")
+
+    def test_checker_uses_release_channel_only_for_stable_installs(self):
+        checker = load_checker()
+        self.assertTrue(checker.uses_release_channel({
+            "requested_revision": "v0.2.0",
+            "editable": False,
+        }))
+        self.assertFalse(checker.uses_release_channel({
+            "requested_revision": "main",
+            "editable": False,
+        }))
+        self.assertFalse(checker.uses_release_channel({
+            "requested_revision": "v0.2.0",
+            "editable": True,
+        }))
+
+    def test_checker_preserves_requested_revision(self):
+        checker = load_checker()
+        source = checker.local_source_info({
+            "direct_url": {
+                "url": "https://github.com/MetaInFLow/basebuilder-cli.git",
+                "vcs_info": {
+                    "commit_id": "abc123",
+                    "requested_revision": "v0.2.0",
+                },
+            },
+        })
+
+        self.assertEqual(source["requested_revision"], "v0.2.0")
+
 
 if __name__ == "__main__":
     unittest.main()

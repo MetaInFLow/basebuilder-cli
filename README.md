@@ -13,10 +13,11 @@ BaseBuilder CLI 是 BaseBuilder 注册用户的本地命令行客户端。用户
 
 ### 安装
 
-推荐用 `pipx` 从 GitHub main 安装，避免污染系统 Python：
+推荐用 `pipx` 安装稳定版 `v0.2.0`，避免污染系统 Python：
 
 ```bash
-pipx install git+https://github.com/MetaInFLow/basebuilder-cli.git
+pipx install "git+https://github.com/MetaInFLow/basebuilder-cli.git@v0.2.0"
+basebuilder --version
 basebuilder doctor
 basebuilder skill install --target codex
 ```
@@ -24,15 +25,22 @@ basebuilder skill install --target codex
 没有 `pipx` 时也可以用用户级 pip 安装：
 
 ```bash
-python3 -m pip install --user git+https://github.com/MetaInFLow/basebuilder-cli.git
+python3 -m pip install --user "git+https://github.com/MetaInFLow/basebuilder-cli.git@v0.2.0"
+basebuilder --version
 basebuilder doctor
 basebuilder skill install --target codex
 ```
 
-升级到 GitHub main 最新版本：
+重新安装当前稳定版：
 
 ```bash
-pipx install --force git+https://github.com/MetaInFLow/basebuilder-cli.git
+pipx install --force "git+https://github.com/MetaInFLow/basebuilder-cli.git@v0.2.0"
+```
+
+开发者需要跟踪 GitHub main 时使用：
+
+```bash
+pipx install --force "git+https://github.com/MetaInFLow/basebuilder-cli.git@main"
 ```
 
 ### 登录和创建

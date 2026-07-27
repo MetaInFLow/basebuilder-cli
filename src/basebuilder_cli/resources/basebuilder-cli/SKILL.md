@@ -18,7 +18,8 @@ python3 <skill-directory>/scripts/check_version.py
 Resolve `<skill-directory>` to the directory containing this `SKILL.md`; do not execute the placeholder literally. Check only once per user task.
 
 - `up_to_date`: continue with `doctor`.
-- `update_available`: report the installed and latest commits, upgrade GitHub main with the original installation method, reinstall this Skill with `basebuilder skill install --target <current-target>`, and rerun the check before continuing. Continue on the old version only when the user explicitly asks to do so, and disclose the risk.
+- `update_available`: report the installed and latest releases, upgrade to the latest stable tag with the original installation method, reinstall this Skill with `basebuilder skill install --target <current-target>`, and rerun the check before continuing. Continue on the old version only when the user explicitly asks to do so, and disclose the risk.
+- `ahead_of_release`: identify the installation as a development build and continue without downgrading it.
 - `editable_source_differs`: report the local and remote commits. Do not overwrite a development branch or uncommitted changes.
 - `not_installed`: follow the installation flow below.
 - `unknown` or `check_failed`: disclose that the latest version could not be confirmed. A network check failure does not block the current business task.
