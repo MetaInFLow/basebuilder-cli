@@ -1,13 +1,114 @@
 # BaseBuilder CLI
 
-BaseBuilder CLI 是 BaseBuilder 注册用户的本地命令行客户端。用户态 AI 请求必须通过 `weave-ai-api`，CLI 只负责登录、协议编排、本地 run metadata、manual 和 per-Base Skill 产物。
+BaseBuilder CLI 是 BaseBuilder 注册用户的本地命令行客户端。默认线上模式的用户态 AI 请求必须通过 `weave-ai-api`，CLI 负责登录、协议编排、本地 run metadata、manual 和 per-Base Skill 产物。当前源码另提供显式 `--local-dev` 本地开发模式，仅调用本机 BaseBuilder 整理需求和生成设计，不执行飞书建表；该能力尚未发布到 `v0.2.0` 稳定标签。
 
 ## 请求地址约定
 
 - 生产默认请求地址是 `https://www.basebuilder.cn`，也就是 HTTPS 默认 443 端口。
 - `basebuilder login` 的生产登录、device approval 和 token exchange 都走 `https://www.basebuilder.cn`。
 - `http://127.0.0.1:8999` 只用于本地开发 smoke，需要通过 `--api-base` 或 `BB_API_BASE` 显式覆盖。
-- CLI 不能配置或请求 Builder 直连地址；用户态 AI 请求只能进入 `www.basebuilder.cn` 背后的 `weave-ai-api`。
+- 默认线上模式不能配置或请求 Builder 直连地址；用户态 AI 请求只能进入 `www.basebuilder.cn` 背后的 `weave-ai-api`。
+- 本地仅设计模式是独立的开发例外，必须显式传入 `--local-dev --api-base http://127.0.0.1:<端口>`；不会读取线上登录配置或回退官网。
+
+## 本地仅设计模式（当前源码，尚未发布）
+
+本模式适用于本机 BaseBuilder → CLI → Praxis 联调，不改变线上默认行为。下面未标注 `--local-dev` 的登录、飞书构建和产物命令均属于线上模式；仅修改 `--api-base` 不会启用本地仅设计模式。
+
+**本地服务不等于离线模型。** `create`、`create optimize` 和 `design draft` 可能调用收费模型，执行前须获得授权；`doctor` 只检查连接、鉴权和协议，不调用模型，也不证明真实 AI 设计质量。
+
+### 启动本机 BaseBuilder
+
+使用已安装 BaseBuilder 依赖的 Python。以下为 Bash 示例（Windows 可用 Git Bash），将路径改成自己的绝对路径；`BB_PYTHON`、`CLI_PYTHON` 分别指向两仓已有虚拟环境的 Python，Windows 通常是 `.venv/Scripts/python.exe`，Unix 通常是 `.venv/bin/python`。
+
+在服务端终端执行：
+
+```bash
+export BB_PYTHON="/absolute/path/BaseBuilder/.venv/Scripts/python.exe"
+export PYTHONPATH="/absolute/path/BaseBuilder/src"
+export BB_LOCAL_ORIGIN="http://127.0.0.1:8999"
+export BB_LOCAL_STATE_DIR="/absolute/path/private-local/builder-state"
+export BB_LOCAL_TOKEN_FILE="/absolute/path/private-local/local-token"
+export BB_LOCAL_MODEL_CONFIG="/absolute/path/private-local/model.yaml"
+
+# 仅首次执行，不覆盖已有 token，也不打印凭据。
+"$BB_PYTHON" -X utf8 -m base_builder.local.app --init-token
+"$BB_PYTHON" -X utf8 -m base_builder.local.app
+```
+
+`model.yaml` 使用 BaseBuilder 的 `selection` / `providers` YAML 格式，配置 provider、model_name 和相应模型认证信息。只有 BaseBuilder 服务端需要模型配置，CLI 不需要模型凭据。专用 token、模型配置、请求数据库和草稿目录均应放在可信私有目录，不入 Git、不共享；Windows 还应限制目录 ACL。不要复用线上登录 token。
+
+服务只监听数字回环地址。CLI 只接受 `http://127.0.0.1:<端口>`，拒绝 `localhost`、其他主机、路径、查询串和 HTTP 重定向，不使用系统 HTTP 代理；服务拒绝浏览器 Origin，不提供 CORS。
+
+### 检查连接、生成和优化三要素
+
+在另一个终端显式使用当前 CLI 源码，不使用已发布的 `v0.2.0`：
+
+```bash
+export CLI_PYTHON="/absolute/path/BaseBuilder-CLI/.venv/Scripts/python.exe"
+export PYTHONPATH="/absolute/path/BaseBuilder-CLI/src"
+export BB_LOCAL_TOKEN_FILE="/absolute/path/private-local/local-token"
+export BB_LOCAL_HOME="/absolute/path/private-local/cli-state"
+
+"$CLI_PYTHON" -X utf8 -m basebuilder_cli --local-dev --api-base http://127.0.0.1:8999 doctor --format json
+
+# 以下命令会调用模型，仅在获授权后执行。
+"$CLI_PYTHON" -X utf8 -m basebuilder_cli --local-dev --api-base http://127.0.0.1:8999 create \
+  --prompt "客户跟进系统" --request-id analyze-001 --format json
+"$CLI_PYTHON" -X utf8 -m basebuilder_cli --local-dev --api-base http://127.0.0.1:8999 create optimize local-analyze-001 \
+  --instruction "增加客户阶段，保留原字段" --request-id optimize-001 --format json
+```
+
+`BB_LOCAL_HOME` 必须是绝对路径，与线上 `BB_HOME` 分离。两个进程争用同一本地目录时，后启动的命令会拒绝执行，应等原命令结束再查询。示例请求 ID 只用于演示：每个新需求或新优化使用新 ID，恢复同一请求则保留原 ID 和原输入。
+
+### 审核三要素，再生成详细设计
+
+先展示并审核最新三要素。准备 `context.json`，只能包含下面四个键，其中 `runId` 和 `elements` 必须与原草稿完全一致，不能用示例文本代替实际回执：
+
+```json
+{
+  "runId": "local-analyze-001",
+  "elements": {
+    "manage_what": "使用最新回执原值",
+    "workflow": "使用最新回执原值",
+    "fields": "使用最新回执原值"
+  },
+  "intake": {},
+  "sourceSignature": "demo-confirmed-requirement-v1"
+}
+```
+
+如果回执包含 `backgroundKnowledge`，也必须原样保留在 `elements` 中。`intake` 保存已确认需求背景，`sourceSignature` 绑定该需求版本。Praxis 接入时由服务端生成并核对上下文，不应手工替换。
+
+```bash
+"$CLI_PYTHON" -X utf8 -m basebuilder_cli --local-dev --api-base http://127.0.0.1:8999 design draft local-analyze-001 \
+  --request-id design-001 --input /absolute/path/context.json --format json
+"$CLI_PYTHON" -X utf8 -m basebuilder_cli --local-dev --api-base http://127.0.0.1:8999 design inspect local-analyze-001 \
+  --request-id design-001 --format json
+"$CLI_PYTHON" -X utf8 -m basebuilder_cli --local-dev --api-base http://127.0.0.1:8999 runs inspect local-analyze-001 --format json
+```
+
+`design draft` 返回原请求状态；`queued` / `running` 时用 `design inspect` 查询，成功后返回 `basebuilder.system-design/v1` 的 `design`。CLI 不创建原生业务表，详细设计还需在 Praxis 中审核并再次确认发布。不要执行线上的 `create confirm`：local 会拒绝该命令，也不支持 login、agent、报告、飞书操作、文件附件或 Excel 模式。
+
+### 请求恢复与限制
+
+- 请求 ID 绑定操作和输入；恢复必须保留原 ID、原输入与原状态目录，不能用同 ID 提交不同内容。
+- 服务或网络异常时不要换 ID 重做。已提交的设计用 `design inspect`；分析或优化可在核对原请求后，以原 ID 和完全相同参数恢复。`runs inspect` 优先查询设计，否则查询最初分析，不用于查询待完成的优化。
+- `failed` / `interrupted` 需要人工核对，不自动重调模型。重启后遗留 `running` 标记为 `interrupted`，未执行的 `queued` 可以继续；不承诺模型调用与落盘之间崩溃时的 exactly-once。
+- 草稿绑定 origin 和持久 serviceId。更换端口、服务状态目录或服务身份后，不能拿旧草稿继续执行；重启原服务须保留原目录和配置。
+- 查询未找到不能证明模型未执行，应核对服务和本地状态，不擅自新建请求。目前没有自动修复所有“本地已保存、服务尚未入队”的断点。
+
+### CLI 完整离线回归
+
+先按上文设置 `CLI_PYTHON` 和 CLI 的 `PYTHONPATH`，再隔离用户目录运行。测试使用替身或本机 HTTP，不调用真实模型；`-X utf8` 避免 Windows 默认编码影响中文夹具。
+
+```bash
+TEST_HOME="$("$CLI_PYTHON" -X utf8 -c 'import tempfile; print(tempfile.mkdtemp(prefix="basebuilder-cli-tests-"))')"
+HOME="$TEST_HOME" USERPROFILE="$TEST_HOME" BB_HOME="$TEST_HOME/online" BB_LOCAL_HOME="$TEST_HOME/local" \
+  PYTHONDONTWRITEBYTECODE=1 PYTHONUTF8=1 \
+  "$CLI_PYTHON" -X utf8 -m unittest discover -s /absolute/path/BaseBuilder-CLI/tests -v
+```
+
+临时测试目录可能包含合成草稿和 Skill，核对后自行清理；不要对真实用户目录运行未隔离测试。
 
 ## Quick Start
 
@@ -125,6 +226,14 @@ basebuilder create confirm <draft-run-id> --format json
 ```
 
 `confirm` 会复用草稿中的 `message_id`、`task_id` 和三要素，不会再次执行 analyze。不要在用户确认后重新运行 `create` 或 `create --auto-accept`，否则会破坏同一任务的会话 lineage；CLI 也会用 `DRAFT_CONFIRMATION_REQUIRED` 阻止相同需求绕过待确认草稿。`--auto-accept` 只用于用户从一开始就明确授权跳过 review 的可信自动化。需要修改时可以选择 `edit`，或用 `optimize` 加一句调整要求；`optimize` 可以继续附加多个文件作为上下文。
+
+当前开发候选增加了非交互方案优化命令（尚未发布到上述 `v0.2.0` 稳定标签）：
+
+```bash
+basebuilder create optimize <draft-run-id> --instruction "增加回款跟进，保留客户字段" --format json
+```
+
+此命令只更新原待确认草稿，保留任务上下文，不会开始构建。优化后需要重新审核并执行 `create confirm`。如果优化结果无法确认，旧草稿保留，但应先核对原任务，不自动重试或确认构建。
 
 Excel/CSV 结构优先模式：
 

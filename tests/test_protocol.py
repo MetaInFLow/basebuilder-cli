@@ -33,8 +33,9 @@ class ProtocolTest(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, "-m", "basebuilder_cli", "ext", "describe", "--format", "json"],
             cwd=ROOT,
-            env={"PYTHONPATH": str(SRC)},
+            env={"PYTHONPATH": str(SRC), "PYTHONUTF8": "1"},
             text=True,
+            encoding="utf-8",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=True,

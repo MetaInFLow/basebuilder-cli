@@ -62,6 +62,11 @@ class FakeAnalyzeClient:
 
 
 class IntakeReportLarkTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch("sys.stdin.isatty", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_skill_description_describes_when_to_use_basebuilder(self):
         skill_text = (ROOT / "skills" / "basebuilder-cli" / "SKILL.md").read_text()
         description_line = next(line for line in skill_text.splitlines() if line.startswith("description: "))
@@ -87,12 +92,12 @@ class IntakeReportLarkTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertTrue(installed.exists())
             self.assertIn("BaseBuilder CLI", installed.read_text())
-            self.assertIn(str(target), out.getvalue())
+            self.assertEqual(json.loads(out.getvalue())["data"]["path"], str(target))
 
             generated = Path(tmp) / "generated-skill"
             generated.mkdir()
             (generated / "SKILL.md").write_text("---\nname: basebuilder-base-abc123\n---\n# Generated\n")
-            with mock.patch.dict(os.environ, {"HOME": tmp}):
+            with mock.patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}):
                 with contextlib.redirect_stdout(io.StringIO()):
                     generated_code = cli.main(["skill", "install", "--source", str(generated), "--target", "codex"])
             self.assertEqual(generated_code, 0)
