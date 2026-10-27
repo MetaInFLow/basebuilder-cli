@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import re
 import shutil
 import sys
 import webbrowser
@@ -30,6 +31,7 @@ COMMANDS = [
     "whoami",
     "create",
     "create confirm",
+    "create optimize",
     "runs list",
     "runs inspect",
     "runs attach",
@@ -51,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.local_dev:
+            from .local import dispatch
+            return int(dispatch(args) or 0)
+        if args.command == "design":
+            raise ApiError("LOCAL_MODE_REQUIRED", "design 命令仅支持显式 --local-dev 模式。")
         return int(args.func(args) or 0)
     except ApiError as exc:
         print(dumps(error_envelope(getattr(args, "operation", "cli"), exc.code, str(exc), retryable=exc.retryable)))
@@ -77,7 +84,15 @@ def build_parser() -> argparse.ArgumentParser:
             "(HTTPS port 443). Use http://127.0.0.1:8999 only for explicit local dev smoke."
         ),
     )
+    parser.add_argument("--local-dev", action="store_true", help="显式调用本机仅设计服务，隔离线上登录状态。")
     sub = parser.add_subparsers(dest="command", required=True)
+    design = sub.add_parser("design")
+    design.add_argument("design_action", choices=["draft", "inspect"])
+    design.add_argument("draft_run_id")
+    design.add_argument("--request-id", required=True)
+    design.add_argument("--input", default="")
+    design.add_argument("--format", choices=["human", "json"], default="json")
+    design.set_defaults(operation="design")
 
     health = sub.add_parser("health")
     health.add_argument("--format", choices=["human", "json"], default="human")
@@ -101,8 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
     whoami.set_defaults(func=cmd_whoami, operation="me")
 
     create = sub.add_parser("create")
-    create.add_argument("create_action", nargs="?", choices=["confirm"])
+    create.add_argument("create_action", nargs="?", choices=["confirm", "optimize"])
     create.add_argument("draft_run_id", nargs="?")
+    create.add_argument("--request-id", default="", help="本地模式恢复同一请求的稳定标识。")
+    create.add_argument("--instruction", default="", help="待确认方案的修改意见。")
     create.add_argument("--prompt", default="")
     create.add_argument("--input", default="", help="JSON structured intake file.")
     create.add_argument("--mode", choices=["text", "excel"], default="text")
@@ -328,6 +345,9 @@ def cmd_whoami(args: argparse.Namespace) -> int:
 
 
 def cmd_create(args: argparse.Namespace) -> int:
+    if args.create_action == "optimize":
+        args.operation = "builds.optimize"
+        return cmd_create_optimize(args)
     if args.create_action == "confirm":
         return cmd_create_confirm(args)
 
@@ -412,6 +432,47 @@ def cmd_create(args: argparse.Namespace) -> int:
         print("任务已在后台运行，CLI 不会持续轮询。")
         print(f"查看一次状态: basebuilder runs inspect {run_id} --format json")
     return 0
+
+
+def cmd_create_optimize(args: argparse.Namespace) -> int:
+    draft_run_id = str(args.draft_run_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,179}", draft_run_id):
+        raise ApiError("DRAFT_RUN_ID_INVALID", "请提供有效的本地草稿 run id。", retryable=False)
+    instruction = args.instruction.strip()
+    if not instruction or len(args.instruction) > 8000:
+        raise ApiError("INSTRUCTION_INVALID", "修改意见不能为空且不得超过 8000 字。", retryable=False)
+    if args.auto_accept or args.wait or args.prompt or args.input or args.file:
+        raise ApiError("OPTIMIZE_OPTIONS_INVALID", "优化只接受原草稿和修改意见，不会创建或确认构建。", retryable=False)
+    try:
+        row = load_run(draft_run_id)
+    except FileNotFoundError as exc:
+        raise ApiError("DRAFT_RUN_NOT_FOUND", "未找到本地草稿，不会创建新任务。", retryable=False) from exc
+    if row.get("status") != "needs_confirmation" or row.get("canonical_run_id"):
+        raise ApiError("DRAFT_NOT_EDITABLE", "只有尚未确认的原草稿可以优化。", retryable=False)
+    message_id = extract_message_id(row)
+    task_id = extract_task_id(row)
+    if not message_id or not task_id:
+        raise ApiError("DRAFT_TASK_CONTEXT_MISSING", "草稿缺少任务上下文，不会创建新任务。", retryable=False)
+    elements = normalize_elements(row.get("elements") or {})
+    if any(not getattr(elements, key).strip() for key in ("manage_what", "workflow", "fields")):
+        raise ApiError("DRAFT_ELEMENTS_INVALID", "草稿三要素不完整，请核对原任务。", retryable=False)
+    cfg = make_config(args)
+    try:
+        response = BaseBuilderApiClient(cfg.api_base, cfg.token).optimize(
+            elements, instruction, message_id=message_id, task_id=task_id,
+        )
+        updated = normalize_elements(response)
+        if any(not getattr(updated, key).strip() for key in ("manage_what", "workflow", "fields")):
+            raise ValueError("优化返回的三要素不完整")
+        message_id = extract_message_id(response) or message_id
+        task_id = extract_task_id(response) or task_id
+        save_run(draft_run_id, {"elements": updated.to_dict(), "message_id": message_id,
+                               "task_id": task_id, "status": "needs_confirmation"})
+    except Exception as exc:
+        raise ApiError("OPTIMIZE_REVIEW_REQUIRED", "优化未完成或结果无法确认，旧草稿已保留；请核对原任务，不要自动重试或开始构建。", retryable=False) from exc
+    result = CreateResult(status="needs_confirmation", elements=updated, run={}, message_id=message_id, task_id=task_id)
+    return emit(args.format, "builds.optimize", create_result_payload(result, draft_run_id),
+                human=json.dumps(updated.to_dict(), ensure_ascii=False, indent=2))
 
 
 def cmd_create_confirm(args: argparse.Namespace) -> int:

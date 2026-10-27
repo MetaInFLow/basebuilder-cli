@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,7 @@ def _read_run(run_id: str) -> dict[str, Any]:
     path = _run_path(run_id)
     if not path.exists():
         raise FileNotFoundError(f"run not found: {run_id}")
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def save_run(run_id: str, payload: dict[str, Any]) -> Path:
@@ -30,7 +32,15 @@ def save_run(run_id: str, payload: dict[str, Any]) -> Path:
     existing = _read_run(run_id) if path.exists() else {}
     existing.update(payload)
     existing.setdefault("run_id", run_id)
-    path.write_text(json.dumps(existing, ensure_ascii=False, indent=2))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=root, prefix=".run-", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(json.dumps(existing, ensure_ascii=False, indent=2))
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return path
 
 
@@ -90,7 +100,7 @@ def list_runs() -> list[dict[str, Any]]:
     result = []
     for path in sorted(root.glob("*/run.json"), reverse=True):
         try:
-            row = json.loads(path.read_text())
+            row = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
         run_id = str(row.get("run_id") or path.parent.name)

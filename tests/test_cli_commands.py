@@ -267,6 +267,11 @@ class FakeUrlopenResponse:
 
 
 class CliCommandTest(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch("sys.stdin.isatty", return_value=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_top_level_version_flag_reports_release_version(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -673,6 +678,89 @@ class CliCommandTest(unittest.TestCase):
         self.assertIn("确认方案", "\n".join(payload["data"]["nextSteps"]))
         self.assertIn("basebuilder create confirm", "\n".join(payload["data"]["nextSteps"]))
         self.assertEqual(payload["data"]["run"], {})
+
+    def test_optimize_updates_same_draft_and_confirmation_uses_latest_plan(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"BB_HOME": tmp}):
+            cli.save_run("run_draft", {
+                "status": "needs_confirmation", "message_id": 321, "task_id": "task_cli_321",
+                "elements": {"manage_what": "客户", "workflow": "跟进", "fields": "客户名称"},
+            })
+            client = FakeInteractiveClient("https://www.basebuilder.cn")
+            with mock.patch.object(cli, "BaseBuilderApiClient", return_value=client):
+                for instruction in ("增加成交复盘", "保留客户字段"):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        code = cli.main(["create", "optimize", "run_draft", "--instruction", instruction, "--format", "json"])
+                    self.assertEqual(code, 0, output.getvalue())
+                    payload = json.loads(output.getvalue())
+                    self.assertEqual(payload["operation"], "builds.optimize")
+                    self.assertEqual(payload["data"]["runId"], "run_draft")
+                    self.assertTrue(payload["data"]["confirmationRequired"])
+                self.assertEqual([call[0] for call in client.calls], ["optimize", "optimize"])
+                self.assertEqual(client.calls[0][2:], (321, "task_cli_321"))
+                self.assertEqual(len(cli.list_runs()), 1)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["create", "confirm", "run_draft", "--format", "json"]), 0)
+                self.assertEqual(client.calls[-1][0], "start_build")
+                self.assertEqual(client.calls[-1][1].workflow, "录入线索 -> 跟进 -> 成交复盘")
+
+    def test_optimize_rejects_invalid_draft_and_instruction_before_api(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"BB_HOME": tmp}):
+            row = {"status": "needs_confirmation", "message_id": 321, "task_id": "task_cli_321",
+                   "elements": {"manage_what": "客户", "workflow": "跟进", "fields": "名称"}}
+            cli.save_run("run_draft", row)
+            with mock.patch.object(cli, "BaseBuilderApiClient") as factory:
+                for run_id, instruction in (("../outside", "改进"), ("missing", "改进"), ("run_draft", " "), ("run_draft", "改" * 8001)):
+                    with self.subTest(run_id=run_id, length=len(instruction)), contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(cli.main(["create", "optimize", run_id, "--instruction", instruction, "--format", "json"]), 1)
+                for changes in ({"status": "running"}, {"task_id": ""}, {"message_id": 0}, {"elements": {}}):
+                    cli.save_run("run_draft", {**row, **changes})
+                    with self.subTest(changes=changes), contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(cli.main(["create", "optimize", "run_draft", "--instruction", "增加回款", "--format", "json"]), 1)
+                factory.assert_not_called()
+
+    def test_optimize_updates_server_context_and_preserves_previous_file_on_save_error(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"BB_HOME": tmp}):
+            path = cli.save_run("run_draft", {"status": "needs_confirmation", "message_id": 321,
+                "task_id": "task_original", "elements": {"manage_what": "客户", "workflow": "跟进", "fields": "名称"}})
+            response = {"messageId": 456, "taskId": "task_updated",
+                        "elements": {"manage_what": "客户", "workflow": "跟进到成交", "fields": "名称、阶段"}}
+            with mock.patch.object(cli, "BaseBuilderApiClient") as factory:
+                factory.return_value.optimize.return_value = response
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["create", "optimize", "run_draft", "--instruction", "补充阶段", "--format", "json"]), 0)
+                updated = cli.load_run("run_draft")
+                self.assertEqual((updated["message_id"], updated["task_id"]), (456, "task_updated"))
+                original = path.read_bytes()
+                with mock.patch("basebuilder_cli.runs.os.replace", side_effect=OSError("save failed")):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(cli.main(["create", "optimize", "run_draft", "--instruction", "调整流程", "--format", "json"]), 1)
+                self.assertEqual(path.read_bytes(), original)
+                factory.return_value.start_build.assert_not_called()
+
+    def test_optimize_failure_preserves_previous_draft(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"BB_HOME": tmp}):
+            path = cli.save_run("run_draft", {"status": "needs_confirmation", "message_id": 321,
+                "task_id": "task_cli_321", "elements": {"manage_what": "客户", "workflow": "跟进", "fields": "名称"}})
+            original = path.read_bytes()
+            with mock.patch.object(cli, "BaseBuilderApiClient") as factory:
+                factory.return_value.optimize.side_effect = ApiError("API_UNAVAILABLE", "暂不可用", retryable=True)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cli.main(["create", "optimize", "run_draft", "--instruction", "增加回款", "--format", "json"]), 1)
+                factory.return_value.optimize.assert_called_once()
+                factory.return_value.analyze.assert_not_called()
+                factory.return_value.start_build.assert_not_called()
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_atomic_run_save_failure_preserves_previous_file(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"BB_HOME": tmp}):
+            path = cli.save_run("run_draft", {"status": "needs_confirmation"})
+            original = path.read_bytes()
+            with mock.patch("basebuilder_cli.runs.os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    cli.save_run("run_draft", {"status": "changed"})
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual([file.name for file in path.parent.iterdir()], ["run.json"])
 
     def test_create_confirm_reuses_draft_context_without_second_analyze(self):
         FakeConfirmClient.start_calls = []
