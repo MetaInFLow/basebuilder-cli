@@ -11,6 +11,62 @@ from .intake import build_intake_prompt
 from .protocol import dumps, ok_envelope
 
 
+DESIGN_ERROR_CODES = {"LOCAL_DESIGN_OUTPUT_INVALID", "LOCAL_DESIGN_EXECUTION_FAILED",
+                      "LOCAL_EXECUTION_FAILED", "LOCAL_REVIEW_REQUIRED"}
+DESIGN_ERROR_REASONS = {
+    "json": {"invalid_json", "duplicate_key", "non_finite_number"},
+    "contract": {"invalid_contract", "invalid_id", "invalid_name", "duplicate_identifier",
+                 "invalid_options", "required_relation", "invalid_display_field",
+                 "invalid_relation_endpoint", "relation_table_missing", "relation_field_missing",
+                 "relation_field_type", "relation_endpoint_reused", "unbound_relation", "relation_target_missing",
+                 "relation_reverse_field_missing", "relation_cardinality_missing", "relation_target_not_found",
+                 "relation_reverse_field_conflict"},
+    "platform": {"platform_mismatch", "unsupported_relation", "unsupported_primary",
+                 "field_name_too_long", "platform_limit"},
+}
+DESIGN_EXECUTION_ERROR_REASONS = {
+    "authentication", "permission_denied", "connection", "timeout", "rate_limit",
+    "response_parse", "invalid_request", "runtime", "unknown",
+}
+DESIGN_ERROR_PATH_FIELDS = set(
+    "schema designId revision name tables relations warnings platform id displayFieldId fields type "
+    "required options fromTableId fromFieldId toTableId toFieldId fromMany toMany".split())
+
+
+def safe_design_error(response):
+    value = response.get("error")
+    if response.get("status") == "interrupted" or not isinstance(value, dict):
+        return {"code": "LOCAL_REVIEW_REQUIRED"}
+    code = value.get("code")
+    result = {"code": code if isinstance(code, str) and code in DESIGN_ERROR_CODES else "LOCAL_REVIEW_REQUIRED"}
+    stage, reason = value.get("stage"), value.get("reason")
+    # Jobs receipts include a fixed message; never render it or let it suppress valid diagnostics.
+    if result["code"] == "LOCAL_DESIGN_EXECUTION_FAILED":
+        if (not set(value) - {"code", "message", "stage", "reason"}
+                and isinstance(stage, str) and stage in {"initialization", "execution"}
+                and isinstance(reason, str) and reason in DESIGN_EXECUTION_ERROR_REASONS):
+            result.update(stage=stage, reason=reason)
+        return result
+    if (result["code"] != "LOCAL_DESIGN_OUTPUT_INVALID"
+            or set(value) - {"code", "message", "stage", "reason", "paths"}
+            or not isinstance(stage, str) or stage not in DESIGN_ERROR_REASONS
+            or not isinstance(reason, str) or reason not in DESIGN_ERROR_REASONS[stage]):
+        return result
+    if "paths" in value:
+        paths = value["paths"]
+        if not isinstance(paths, list) or len(paths) > 5:
+            return result
+        for path in paths:
+            if (not isinstance(path, str) or not 0 < len(path) <= 160
+                    or not all(part in DESIGN_ERROR_PATH_FIELDS
+                               or re.fullmatch(r"0|[1-9][0-9]{0,2}", part) and int(part) <= 499
+                               for part in path.split("."))):
+                return result
+        result["paths"] = paths
+    result.update(stage=stage, reason=reason)
+    return result
+
+
 def failure(message):
     return ApiError("LOCAL_REVIEW_REQUIRED", message)
 
@@ -172,6 +228,18 @@ def dispatch_locked(args):
     def persist(row):
         save(directory / (valid_id(row["runId"]) + ".json"), row)
 
+    def design_operation(row):
+        return "platform-design" if "platform" in row.get("designInput", {}) else "design"
+
+    def design_result(row, response):
+        result = response.get("result", {})
+        if not isinstance(result, dict) or result.get("runId") != row["runId"] or not isinstance(result.get("design"), dict):
+            raise failure("设计结果与原草稿不一致")
+        design = result["design"]
+        if design_operation(row) == "platform-design" and (design.get("schema") != "basebuilder.platform-design/v1" or design.get("platform") != row["designInput"]["platform"]):
+            raise failure("平台设计结果与原请求的平台或合同不一致")
+        return design
+
     def wait(request_id, operation, response):
         end = time.monotonic() + 150
         while response["status"] in {"queued", "running"}:
@@ -230,31 +298,96 @@ def dispatch_locked(args):
     elif args.command == "design":
         row = load(args.draft_run_id)
         request_id = valid_id(args.request_id)
-        if args.design_action == "draft":
+        if args.design_action == "fork":
+            run_id = valid_id("local-fork-" + request_id)
+            context = row.get("designInput")
+            if not row.get("designRequestId") or not isinstance(context, dict) or "platform" not in context or row.get("pendingOptimize"):
+                raise failure("只有已绑定平台设计且无待核对优化的本地草稿可以派生")
+            fork = {"runId": run_id, "backend": backend, "prompt": row["prompt"],
+                    "elements": complete_elements(row.get("elements")),
+                    "status": "needs_confirmation", "forkedFrom": args.draft_run_id}
+            if (directory / (run_id + ".json")).exists():
+                existing = load(run_id)
+                if any(existing.get(key) != fork[key] for key in ("backend", "runId", "forkedFrom", "prompt", "elements")):
+                    raise failure("原派生标识已绑定不同来源或内容，不会覆盖")
+            else:
+                persist(fork)
+            data = {"runId": run_id, "elements": fork["elements"], "confirmationRequired": True,
+                    "serviceId": capability["serviceId"]}
+            print(dumps(ok_envelope("local.design", data)))
+            return 0
+        if args.design_action == "resume" or args.design_action == "inspect" and args.input:
+            context = read_json(Path(args.input)) if args.input else None
+            keys = {"runId", "elements", "intake", "sourceSignature", "platform"}
+            if (not isinstance(context, dict) or set(context) != keys
+                    or row.get("runId") != args.draft_run_id or context["runId"] != row["runId"]
+                    or context["elements"] != complete_elements(row.get("elements"))
+                    or not isinstance(context["intake"], dict)
+                    or not isinstance(context["sourceSignature"], str) or not context["sourceSignature"]
+                    or context["platform"] not in ("feishu", "dingtalk") or row.get("pendingOptimize")):
+                raise failure("恢复设计上下文与原草稿不一致")
+            platforms = capability.get("platforms")
+            if (capability.get("platformDesignSchema") != "basebuilder.platform-design/v1"
+                    or not isinstance(platforms, list) or context["platform"] not in platforms):
+                raise failure("本地服务不支持该平台设计合同")
+            bound = "designRequestId" in row or "designInput" in row
+            if bound:
+                if row.get("designRequestId") != request_id or row.get("designInput") != context:
+                    raise failure("原设计请求绑定不完整或内容不一致")
+                response = client.inspect(request_id, design_operation(row))
+            else:
+                source_id = valid_id(row.get("forkedFrom"))
+                source = load(source_id)
+                if (not row["runId"].startswith("local-fork-") or row.get("status") != "needs_confirmation"
+                        or source.get("prompt") != row.get("prompt") or source.get("elements") != row.get("elements")
+                        or not source.get("designRequestId") or not isinstance(source.get("designInput"), dict)
+                        or source["designInput"].get("platform") not in ("feishu", "dingtalk")
+                        or source.get("pendingOptimize")):
+                    raise failure("原派生草稿来源无效，不能确认尚未提交")
+                if args.design_action == "inspect":
+                    response = {"status": "not_submitted"}
+                else:
+                    row.update(designRequestId=request_id, designInput=context)
+                    persist(row)
+                    response = client.submit(request_id, design_operation(row), context)
+        elif args.design_action == "draft":
             context = read_json(Path(args.input))
-            if not isinstance(context, dict) or set(context) != {"runId", "elements", "intake", "sourceSignature"} or context["runId"] != row["runId"] or context["elements"] != row.get("elements") or row.get("pendingOptimize"):
+            context_keys = {"runId", "elements", "intake", "sourceSignature"}
+            if not isinstance(context, dict) or set(context) not in (context_keys, context_keys | {"platform"}) or context["runId"] != row["runId"] or context["elements"] != row.get("elements") or row.get("pendingOptimize"):
                 raise failure("详细设计必须使用原草稿的已确认三要素和上下文")
+            if "platform" in context and context["platform"] not in ("feishu", "dingtalk"):
+                raise failure("本地平台设计仅接受 feishu 或 dingtalk")
             if row.get("designRequestId") and (row["designRequestId"] != request_id or row["designInput"] != context):
                 raise failure("原设计请求已绑定不同内容，不会重新生成")
+            if "platform" in context:
+                platforms = capability.get("platforms")
+                if capability.get("platformDesignSchema") != "basebuilder.platform-design/v1" or not isinstance(platforms, list) or context["platform"] not in platforms:
+                    raise failure("本地服务不支持该平台设计合同，不会提交或绑定请求")
             row.update(designRequestId=request_id, designInput=context)
             persist(row)
-            response = client.submit(request_id, "design", context)
+            response = client.submit(request_id, design_operation(row), context)
         else:
-            if row.get("designRequestId") != request_id:
-                raise failure("原草稿未绑定该设计请求")
-            response = client.inspect(request_id, "design")
+            if row.get("designRequestId") != request_id or not isinstance(row.get("designInput"), dict):
+                raise failure("原草稿未完整绑定该设计请求")
+            response = client.inspect(request_id, design_operation(row))
         data = {"runId": row["runId"], "requestId": request_id, "status": response["status"], "serviceId": capability["serviceId"]}
         if response["status"] == "succeeded":
-            result = response.get("result", {})
-            if result.get("runId") != row["runId"] or not isinstance(result.get("design"), dict):
-                raise failure("设计结果与原草稿不一致")
-            data["design"] = result["design"]
+            data["design"] = design_result(row, response)
+        elif response["status"] in {"failed", "interrupted"}:
+            data["error"] = safe_design_error(response)
     elif args.runs_command == "list":
         data = {"items": [value for path in directory.glob("*.json") if (value := read_json(path)).get("backend") == backend]}
     else:
         data = load(args.run_id)
         request_id = data.get("designRequestId") or data.get("requestId")
         if request_id:
-            data = {**data, "snapshot": client.inspect(request_id, "design" if data.get("designRequestId") else "analyze")}
+            response = client.inspect(request_id, design_operation(data) if data.get("designRequestId") else "analyze")
+            if data.get("designRequestId"):
+                if design_operation(data) == "platform-design" and response["status"] == "succeeded":
+                    design_result(data, response)
+                elif response["status"] in {"failed", "interrupted"}:
+                    response = {**{key: response[key] for key in ("serviceId", "requestId", "operation", "status")},
+                                "error": safe_design_error(response)}
+            data = {**data, "snapshot": response}
     print(dumps(ok_envelope("local." + args.command, data)))
     return 0
