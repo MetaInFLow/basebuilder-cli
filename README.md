@@ -62,7 +62,7 @@ export BB_LOCAL_HOME="/absolute/path/private-local/cli-state"
 
 ### 审核三要素，再生成详细设计
 
-先展示并审核最新三要素。准备 `context.json`，只能包含下面四个键，其中 `runId` 和 `elements` 必须与原草稿完全一致，不能用示例文本代替实际回执：
+先展示并审核最新三要素。准备 `context.json`，原生设计使用下面四个键；平台设计另加 `"platform": "feishu"`。`runId` 和 `elements` 必须与原草稿完全一致，不能用示例文本代替实际回执：
 
 ```json
 {
@@ -87,7 +87,9 @@ export BB_LOCAL_HOME="/absolute/path/private-local/cli-state"
 "$CLI_PYTHON" -X utf8 -m basebuilder_cli --local-dev --api-base http://127.0.0.1:8999 runs inspect local-analyze-001 --format json
 ```
 
-`design draft` 返回原请求状态；`queued` / `running` 时用 `design inspect` 查询，成功后返回 `basebuilder.system-design/v1` 的 `design`。CLI 不创建原生业务表，详细设计还需在 Praxis 中审核并再次确认发布。不要执行线上的 `create confirm`：local 会拒绝该命令，也不支持 login、agent、报告、飞书操作、文件附件或 Excel 模式。
+`design draft` 返回原请求状态；`queued` / `running` 时用 `design inspect` 查询。四键原生请求成功后返回 `basebuilder.system-design/v1`；五键平台请求返回 `basebuilder.platform-design/v1`，其 `platform` 必须匹配原请求。平台请求提交前检查服务 capabilities；服务当前声明支持飞书与钉钉平台设计，未声明的平台不会提交或绑定请求。同一设计请求不能更换平台、输入或 ID；两种 inspect 均查询原操作，不重新生成。
+
+CLI 只生成设计，不授权平台账号或创建远端表。Praxis 在用户完成设计审核、账号核验并分别确认后，才会执行真实建表与业务系统登记；设计完成本身不代表系统已上线。不要执行线上的 `create confirm`：local 会拒绝该命令，也不支持 login、agent、报告、飞书操作、文件附件或 Excel 模式。
 
 ### 请求恢复与限制
 

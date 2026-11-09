@@ -87,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-dev", action="store_true", help="显式调用本机仅设计服务，隔离线上登录状态。")
     sub = parser.add_subparsers(dest="command", required=True)
     design = sub.add_parser("design")
-    design.add_argument("design_action", choices=["draft", "inspect"])
+    design.add_argument("design_action", choices=["draft", "inspect", "fork", "resume"])
     design.add_argument("draft_run_id")
     design.add_argument("--request-id", required=True)
     design.add_argument("--input", default="")
