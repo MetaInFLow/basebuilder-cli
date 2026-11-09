@@ -83,6 +83,13 @@ def origin_url(value):
     return value
 
 
+def request_body(data):
+    body = json.dumps(data, ensure_ascii=True, allow_nan=False).encode("utf-8")
+    if len(body) > 256 * 1024:
+        raise failure("本地请求内容过大")
+    return body
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise failure("本地服务禁止HTTP重定向")
@@ -106,10 +113,8 @@ class LocalClient:
             headers["X-BaseBuilder-Service-Id"] = self.service_id
         body = None
         if data is not None:
-            body = json.dumps(data, ensure_ascii=True, allow_nan=False).encode("utf-8")
+            body = request_body(data)
             headers["Content-Type"] = "application/json"
-            if len(body) > 256 * 1024:
-                raise failure("本地请求内容过大")
         request = urllib.request.Request(self.origin + path, data=body, method=method, headers=headers)
         try:
             with self.opener.open(request, timeout=15) as response:
@@ -209,6 +214,8 @@ def dispatch_locked(args):
         raise failure("本地模式不支持网页登录、飞书构建或扩展命令")
     if args.command == "create" and (args.create_action == "confirm" or args.auto_accept or args.wait or args.file or args.mode != "text"):
         raise failure("本地模式只整理需求和设计，不执行飞书构建或文件导入")
+    if args.command == "create" and args.request_id:
+        valid_id(args.request_id)
     if args.command == "runs" and args.runs_command not in {"list", "inspect"}:
         raise failure("本地模式不支持此任务操作")
     home = os.environ.get("BB_LOCAL_HOME", "")
@@ -266,10 +273,11 @@ def dispatch_locked(args):
                 return 0
             data_input = {"elements": row["elements"], "instruction": args.instruction.strip()}
             pending = row.get("pendingOptimize")
-            if pending and pending["input"] != data_input:
+            if pending and (pending["input"] != data_input or (args.request_id and pending["requestId"] != args.request_id)):
                 raise failure("原优化请求仍待核对，不可替换请求内容")
             if pending is None:
                 pending = {"requestId": args.request_id or str(uuid.uuid4()), "input": data_input}
+                request_body({"requestId": pending["requestId"], "operation": "optimize", "input": data_input})
                 row["pendingOptimize"] = pending
                 persist(row)
             response = client.submit(pending["requestId"], "optimize", pending["input"])
@@ -353,7 +361,14 @@ def dispatch_locked(args):
         elif args.design_action == "draft":
             context = read_json(Path(args.input))
             context_keys = {"runId", "elements", "intake", "sourceSignature"}
-            if not isinstance(context, dict) or set(context) not in (context_keys, context_keys | {"platform"}) or context["runId"] != row["runId"] or context["elements"] != row.get("elements") or row.get("pendingOptimize"):
+            if (not isinstance(context, dict)
+                    or set(context) not in (context_keys, context_keys | {"platform"})
+                    or context["runId"] != row["runId"]
+                    or context["elements"] != row.get("elements")
+                    or not isinstance(context["intake"], dict)
+                    or not isinstance(context["sourceSignature"], str)
+                    or not context["sourceSignature"]
+                    or row.get("pendingOptimize")):
                 raise failure("详细设计必须使用原草稿的已确认三要素和上下文")
             if "platform" in context and context["platform"] not in ("feishu", "dingtalk"):
                 raise failure("本地平台设计仅接受 feishu 或 dingtalk")
@@ -363,6 +378,8 @@ def dispatch_locked(args):
                 platforms = capability.get("platforms")
                 if capability.get("platformDesignSchema") != "basebuilder.platform-design/v1" or not isinstance(platforms, list) or context["platform"] not in platforms:
                     raise failure("本地服务不支持该平台设计合同，不会提交或绑定请求")
+            operation = "platform-design" if "platform" in context else "design"
+            request_body({"requestId": request_id, "operation": operation, "input": context})
             row.update(designRequestId=request_id, designInput=context)
             persist(row)
             response = client.submit(request_id, design_operation(row), context)
